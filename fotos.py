@@ -1,10 +1,12 @@
 import os
-import shutil
+import json
+import threading
 import exifread
 import tkinter as tk
 from tkinter import filedialog, messagebox
 from datetime import datetime
 from PIL import Image, ImageTk, ImageOps, ImageEnhance
+
 try:
     import numpy as np
 except ImportError:
@@ -15,10 +17,25 @@ import ttkbootstrap as ttkb
 from ttkbootstrap.constants import *
 from ttkbootstrap import Style
 
+CONFIG_FILENAME = "config.json"
+
 class EnhancedImageBrowser:
     def __init__(self, root):
         self.root = root
         self.root.title("jocarsa | lightsteelblue")
+
+        # -------------------------
+        # 1) Load or Create Config
+        # -------------------------
+        self.config = self.load_config()  # loads user hotkeys from config.json
+        # Example structure of self.config:
+        # {
+        #   "next_photo": "Right",
+        #   "prev_photo": "Left",
+        #   "save_photo": "z",
+        #   "increase_exposure": "KP_Add",
+        #   "decrease_exposure": "KP_Subtract"
+        # }
 
         # Variables
         self.folder_path = ""
@@ -32,10 +49,60 @@ class EnhancedImageBrowser:
         self.selection_coords = None    # (x1, y1, x2, y2) in image's coordinate space
         self.canvas_rect_id = None      # ID of the rectangle drawn on the canvas
 
+        # For storing thumbnail ImageTk references so they don't get garbage-collected
+        self.thumb_images_left = {}
+        self.thumb_images_right = {}
+
         # UI setup
         self.create_widgets()
         self.setup_layout()
+        # We will do key-binding AFTER widgets are created
         self.bind_events()
+
+    # -------------------------
+    # Load / Save Config
+    # -------------------------
+    def load_config(self):
+        """
+        Loads the config from a JSON file, or creates it if not found.
+        Returns a dictionary with the hotkeys.
+        """
+        default_config = {
+            "next_photo": "Right",
+            "prev_photo": "Left",
+            "save_photo": "z",
+            "increase_exposure": "KP_Add",
+            "decrease_exposure": "KP_Subtract"
+        }
+        if os.path.exists(CONFIG_FILENAME):
+            try:
+                with open(CONFIG_FILENAME, 'r', encoding='utf-8') as f:
+                    cfg = json.load(f)
+                # Ensure any missing keys from default are populated
+                for k, v in default_config.items():
+                    if k not in cfg:
+                        cfg[k] = v
+                return cfg
+            except Exception as e:
+                print(f"Failed to load config.json; using defaults. Error: {e}")
+                return default_config
+        else:
+            # Create a new config file with default values
+            self.save_config(default_config)
+            return default_config
+
+    def save_config(self, config_dict=None):
+        """
+        Saves config to config.json. If config_dict is None,
+        saves 'self.config' to disk. Otherwise saves config_dict.
+        """
+        if config_dict is None:
+            config_dict = self.config
+        try:
+            with open(CONFIG_FILENAME, 'w', encoding='utf-8') as f:
+                json.dump(config_dict, f, indent=2)
+        except Exception as e:
+            print(f"Error saving config.json: {e}")
 
     # -------------------------
     # UI Construction
@@ -64,6 +131,11 @@ class EnhancedImageBrowser:
         # -- Left column: Treeview for folder images
         self.left_frame = ttkb.Frame(self.main_frame)
         self.left_frame.pack(side=tk.LEFT, fill=tk.Y, padx=5, pady=5)
+
+        # Configure row height so that 64px-high thumbnails are visible
+        style = ttkb.Style()
+        # Setting rowheight slightly more than 64 to have spacing (e.g. 70 or 72)
+        style.configure("Treeview", rowheight=72)
 
         self.folder_tree = ttkb.Treeview(self.left_frame, show="tree")
         self.folder_tree.pack(side=tk.LEFT, fill=tk.Y, expand=True)
@@ -116,27 +188,38 @@ class EnhancedImageBrowser:
         )
         self.copy_image_button.pack(side=tk.LEFT, padx=5)
 
+        # Config button
+        self.config_button = ttkb.Button(
+            self.toolbar_frame,
+            text="Config",
+            command=self.open_config_window,
+            bootstyle=SECONDARY
+        )
+        self.config_button.pack(side=tk.LEFT, padx=5)
+
+        # -- Footer toolbar (for rename button)
+        self.footer_toolbar_frame = ttkb.Frame(self.root)
+        self.footer_toolbar_frame.pack(side=tk.BOTTOM, fill=tk.X)
+        self.rename_files_button = ttkb.Button(
+            self.footer_toolbar_frame,
+            text="Renombrar (EXIF)",
+            command=self.rename_all_jpg_by_exif,
+            bootstyle=WARNING
+        )
+        self.rename_files_button.pack(side=tk.LEFT, padx=10)
+
     def setup_layout(self):
         """ Additional geometry or layout configurations if needed """
         self.root.geometry("1200x700")  # Initial window size
 
     def bind_events(self):
-        """ Bind keyboard and mouse events """
-        # Up/Left for previous, Down/Right for next
-        self.root.bind("<Left>", self.show_previous_image)
-        self.root.bind("<Up>", self.show_previous_image)
-        self.root.bind("<Right>", self.show_next_image)
-        self.root.bind("<Down>", self.show_next_image)
-
-        # Additional exposure keys (numpad + and -):
-        self.root.bind("<KP_Add>", self.increase_exposure)
-        self.root.bind("<KP_Subtract>", self.decrease_exposure)
-
-        # Bind the 'z' key for copying the image
-        self.root.bind("<z>", self.copy_image)
+        """ Bind keyboard and mouse events based on config. """
+        # We use the config keys for next/prev/save/increase/decrease
+        # but we also need to handle other keys (like ignoring unrecognized).
+        self.update_bindings()
 
         # Capture all other key presses to avoid freezing on unrecognized keys
-        self.root.bind("<Key>", self.on_any_key)
+        self.root.bind("<Key>", self.on_any_key, add="+")  # add="+" so we don't remove other bindings
 
         # Mouse events for selection rectangle on the canvas
         self.image_canvas.bind("<ButtonPress-1>", self.on_left_button_press)
@@ -150,6 +233,101 @@ class EnhancedImageBrowser:
         # Handle window resize to update displayed image
         self.center_frame.bind("<Configure>", self.on_center_frame_resize)
 
+    def update_bindings(self):
+        """ Unbind old keys, bind new ones according to self.config. """
+        # Unbind everything that might have been previously bound:
+        for key in ["<Left>", "<Right>", "<Up>", "<Down>",
+                    "<KP_Add>", "<KP_Subtract>", "<z>",
+                    # Also unbind any current config keys
+                    f"<{self.config['next_photo']}>",
+                    f"<{self.config['prev_photo']}>",
+                    f"<{self.config['save_photo']}>",
+                    f"<{self.config['increase_exposure']}>",
+                    f"<{self.config['decrease_exposure']}>"]:
+            try:
+                self.root.unbind(key)
+            except:
+                pass
+
+        # Now bind the newly configured hotkeys
+        self.root.bind(f"<{self.config['prev_photo']}>", self.show_previous_image)
+        self.root.bind(f"<{self.config['next_photo']}>", self.show_next_image)
+        self.root.bind(f"<{self.config['save_photo']}>", self.copy_image)
+        self.root.bind(f"<{self.config['increase_exposure']}>", self.increase_exposure)
+        self.root.bind(f"<{self.config['decrease_exposure']}>", self.decrease_exposure)
+
+    # -------------------------
+    # Config Window (Modal)
+    # -------------------------
+    def open_config_window(self):
+        """
+        Opens a modal (Toplevel) window that allows the user
+        to change hotkeys for next/prev/save/increase/decrease.
+        """
+        config_window = ttkb.Toplevel(self.root)
+        config_window.title("Configurar Hotkeys")
+        config_window.resizable(False, False)
+
+        # Make it modal
+        config_window.grab_set()
+
+        # Current keys from self.config
+        row = 0
+        # Labels & entry fields
+        ttkb.Label(config_window, text="Previous Photo key:").grid(row=row, column=0, padx=5, pady=5, sticky=tk.E)
+        prev_var = tk.StringVar(value=self.config["prev_photo"])
+        prev_entry = ttkb.Entry(config_window, textvariable=prev_var)
+        prev_entry.grid(row=row, column=1, padx=5, pady=5)
+
+        row += 1
+        ttkb.Label(config_window, text="Next Photo key:").grid(row=row, column=0, padx=5, pady=5, sticky=tk.E)
+        next_var = tk.StringVar(value=self.config["next_photo"])
+        next_entry = ttkb.Entry(config_window, textvariable=next_var)
+        next_entry.grid(row=row, column=1, padx=5, pady=5)
+
+        row += 1
+        ttkb.Label(config_window, text="Save Photo key:").grid(row=row, column=0, padx=5, pady=5, sticky=tk.E)
+        save_var = tk.StringVar(value=self.config["save_photo"])
+        save_entry = ttkb.Entry(config_window, textvariable=save_var)
+        save_entry.grid(row=row, column=1, padx=5, pady=5)
+
+        row += 1
+        ttkb.Label(config_window, text="Increase Exposure key:").grid(row=row, column=0, padx=5, pady=5, sticky=tk.E)
+        inc_var = tk.StringVar(value=self.config["increase_exposure"])
+        inc_entry = ttkb.Entry(config_window, textvariable=inc_var)
+        inc_entry.grid(row=row, column=1, padx=5, pady=5)
+
+        row += 1
+        ttkb.Label(config_window, text="Decrease Exposure key:").grid(row=row, column=0, padx=5, pady=5, sticky=tk.E)
+        dec_var = tk.StringVar(value=self.config["decrease_exposure"])
+        dec_entry = ttkb.Entry(config_window, textvariable=dec_var)
+        dec_entry.grid(row=row, column=1, padx=5, pady=5)
+
+        # Save/Cancel buttons
+        def save_changes():
+            """Save the changes to config, update bindings, close window."""
+            # Validate no empty fields, or user might unbind
+            # If user wants to intentionally remove a hotkey, that's possible,
+            # but let's at least ensure they're not using the same one for everything.
+            self.config["prev_photo"] = prev_var.get() or "Left"
+            self.config["next_photo"] = next_var.get() or "Right"
+            self.config["save_photo"] = save_var.get() or "z"
+            self.config["increase_exposure"] = inc_var.get() or "KP_Add"
+            self.config["decrease_exposure"] = dec_var.get() or "KP_Subtract"
+
+            self.save_config()  # updates config.json
+            self.update_bindings()
+            config_window.destroy()
+
+        def cancel():
+            config_window.destroy()
+
+        row += 1
+        button_frame = ttkb.Frame(config_window)
+        button_frame.grid(row=row, column=0, columnspan=2, pady=10)
+        ttkb.Button(button_frame, text="Save", command=save_changes, bootstyle=SUCCESS).pack(side=tk.LEFT, padx=5)
+        ttkb.Button(button_frame, text="Cancel", command=cancel, bootstyle=DANGER).pack(side=tk.LEFT, padx=5)
+
     # -------------------------
     # Generic Key Event Handler
     # -------------------------
@@ -159,9 +337,11 @@ class EnhancedImageBrowser:
         a key that does not have a specific binding.
         """
         recognized_keys = {
-            "Left", "Up", "Right", "Down",
-            "KP_Add", "KP_Subtract",
-            "z"
+            self.config["prev_photo"],
+            self.config["next_photo"],
+            self.config["save_photo"],
+            self.config["increase_exposure"],
+            self.config["decrease_exposure"]
         }
         if event.keysym not in recognized_keys:
             self.update_status(f"Ignored unrecognized key: {event.keysym}")
@@ -178,6 +358,22 @@ class EnhancedImageBrowser:
             self.load_images()
             self.populate_folder_tree()
             self.populate_seleccion_tree()
+
+            # Start threads to generate thumbnails in background
+            self.start_thumbnail_generation(
+                folder_path=self.folder_path,
+                image_list=self.image_list,
+                thumb_dict=self.thumb_images_left,
+                tree=self.folder_tree,
+                subfolder_name="miniaturas"
+            )
+            self.start_thumbnail_generation(
+                folder_path=self.seleccion_folder,
+                image_list=self.seleccion_list,
+                thumb_dict=self.thumb_images_right,
+                tree=self.seleccion_tree,
+                subfolder_name="miniaturas"
+            )
 
             if self.image_list:
                 self.current_index = 0
@@ -202,8 +398,11 @@ class EnhancedImageBrowser:
     def populate_seleccion_tree(self):
         """ Populate the right treeview with files in the seleccion folder """
         self.seleccion_tree.delete(*self.seleccion_tree.get_children())
+        supported_extensions = ('.jpg', '.jpeg', '.JPG', '.JPEG')
         if os.path.exists(self.seleccion_folder):
-            self.seleccion_list = sorted(os.listdir(self.seleccion_folder))
+            self.seleccion_list = sorted(
+                [f for f in os.listdir(self.seleccion_folder) if f.lower().endswith(supported_extensions)]
+            )
         else:
             self.seleccion_list = []
         for fname in self.seleccion_list:
@@ -228,6 +427,71 @@ class EnhancedImageBrowser:
         if item_id:
             fname = self.seleccion_tree.item(item_id, "text")
             self.update_status(f"'seleccion' folder item selected: {fname}")
+
+    # -------------------------
+    # Thumbnails Generation (Background Thread)
+    # -------------------------
+    def start_thumbnail_generation(self, folder_path, image_list, thumb_dict, tree, subfolder_name="miniaturas"):
+        """
+        Starts a background thread to generate thumbnails in a subfolder of `folder_path`.
+        Once a thumbnail is created, updates the TreeView item with the image.
+        """
+        thread = threading.Thread(
+            target=self.generate_thumbnails,
+            args=(folder_path, image_list, thumb_dict, tree, subfolder_name),
+            daemon=True
+        )
+        thread.start()
+
+    def generate_thumbnails(self, folder_path, image_list, thumb_dict, tree, subfolder_name):
+        """
+        Generates thumbnail images in `folder_path/subfolder_name`.  
+        Then updates the TreeView items with the thumbnail images.
+        """
+        if not folder_path:
+            return
+
+        thumbs_folder = os.path.join(folder_path, subfolder_name)
+        os.makedirs(thumbs_folder, exist_ok=True)
+
+        for idx, filename in enumerate(image_list):
+            source_path = os.path.join(folder_path, filename)
+            # Build destination path
+            base, ext = os.path.splitext(filename)
+            thumb_filename = base + "_thumb.jpg"
+            thumb_path = os.path.join(thumbs_folder, thumb_filename)
+
+            # If thumbnail does not exist, generate it
+            if not os.path.exists(thumb_path):
+                try:
+                    with Image.open(source_path) as img:
+                        img = ImageOps.exif_transpose(img)
+                        img.thumbnail((64, 64))  # small thumbnail
+                        img.save(thumb_path, format="JPEG", quality=70)
+                except Exception as e:
+                    print(f"Could not generate thumbnail for {source_path}: {e}")
+                    continue
+
+            # Now load the thumbnail into memory and update the dict
+            try:
+                with Image.open(thumb_path) as thumb_img:
+                    # Keep a reference to the PhotoImage
+                    tk_thumb = ImageTk.PhotoImage(thumb_img)
+                    thumb_dict[filename] = tk_thumb
+
+                # If it's the left folder tree, items have iids = str(idx).
+                # If it's the seleccion tree, items are identified by text=filename.
+                # We'll try to match on both possibilities:
+                if str(idx) in tree.get_children():
+                    tree.item(str(idx), image=tk_thumb)
+                else:
+                    # Might be in the right tree
+                    for item_id in tree.get_children():
+                        if tree.item(item_id, "text") == filename:
+                            tree.item(item_id, image=tk_thumb)
+                            break
+            except Exception as e:
+                print(f"Could not load thumbnail image: {thumb_path} => {e}")
 
     # -------------------------
     # Image Display & Resizing
@@ -451,6 +715,16 @@ class EnhancedImageBrowser:
             cropped_img.save(destination_image, quality=95)
             self.update_status(f"Image copied to '{destination_image}'.")
             self.populate_seleccion_tree()
+
+            # Also generate a thumbnail in seleccion's miniaturas folder (in background)
+            self.start_thumbnail_generation(
+                folder_path=self.seleccion_folder,
+                image_list=[os.path.basename(destination_image)],
+                thumb_dict=self.thumb_images_right,
+                tree=self.seleccion_tree,
+                subfolder_name="miniaturas"
+            )
+
         except Exception as e:
             self.update_status(f"Copy Error: {e}")
             messagebox.showerror("Copy Error", f"Failed to copy image.\n{e}")
@@ -529,6 +803,72 @@ class EnhancedImageBrowser:
         else:
             progress = (self.current_index / (len(self.image_list) - 1)) * 100.0
         self.progress_var.set(progress)
+
+    # -------------------------
+    # Rename All JPG by EXIF
+    # -------------------------
+    def rename_all_jpg_by_exif(self):
+        """
+        Renames all .jpg/.jpeg files in the source folder to 'YYYY-MM-DD-HH-MM-SS.jpg'
+        based on EXIF 'DateTimeOriginal'. If no EXIF date is found, the file is skipped.
+        After renaming, reload the image list and TreeView.
+        """
+        if not self.folder_path:
+            self.update_status("No folder selected.")
+            return
+
+        supported_extensions = ('.jpg', '.jpeg', '.JPG', '.JPEG')
+        all_files = [f for f in os.listdir(self.folder_path) if f.lower().endswith(supported_extensions)]
+
+        renamed_count = 0
+        for old_name in all_files:
+            old_path = os.path.join(self.folder_path, old_name)
+            try:
+                new_name = self.build_destination_filename_rename(old_path, old_name)
+                if new_name != old_name:  # means we found an EXIF date
+                    new_path = os.path.join(self.folder_path, new_name)
+                    base, ext = os.path.splitext(new_name)
+                    # If conflict, append counter
+                    counter = 1
+                    while os.path.exists(new_path):
+                        new_path = os.path.join(self.folder_path, f"{base}_{counter}{ext}")
+                        counter += 1
+
+                    os.rename(old_path, new_path)
+                    renamed_count += 1
+            except Exception as e:
+                print(f"Could not rename {old_name}: {e}")
+
+        # Reload images
+        self.load_images()
+        self.populate_folder_tree()
+        self.update_status(f"Renamed {renamed_count} file(s) based on EXIF in '{self.folder_path}'.")
+
+        # Regenerate the left thumbnails in the background
+        self.start_thumbnail_generation(
+            folder_path=self.folder_path,
+            image_list=self.image_list,
+            thumb_dict=self.thumb_images_left,
+            tree=self.folder_tree,
+            subfolder_name="miniaturas"
+        )
+
+    def build_destination_filename_rename(self, source_path, original_name):
+        """
+        Build a new filename using EXIF date if available. 
+        If no EXIF date is found, return the original_name (skip rename).
+        """
+        try:
+            with open(source_path, 'rb') as img_file:
+                tags = exifread.process_file(img_file, stop_tag="EXIF DateTimeOriginal", details=False)
+                date_tag = tags.get("EXIF DateTimeOriginal") or tags.get("Image DateTime")
+                if date_tag:
+                    date_str = str(date_tag)
+                    dt = datetime.strptime(date_str, "%Y:%m:%d %H:%M:%S")
+                    return dt.strftime("%Y-%m-%d-%H-%M-%S") + ".jpg"
+        except Exception as e:
+            print(f"EXIF reading error for {original_name}: {e}")
+        return original_name  # no rename if no EXIF date found
 
     # -------------------------
     # Utilities
