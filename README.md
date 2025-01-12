@@ -1,6 +1,6 @@
 # jocarsa | lightsteelblue
 
-![LightSteelBlue Logo](https://jocarsa.com/static/logo/jocarsa | LightSteelBlue.svg)
+![LightSteelBlue Logo]("https://jocarsa.com/static/logo/jocarsa | LightSteelBlue.svg")
 
 **Author:** Jose Vicente Carratala Sanchis  
 **Repository:** [https://github.com/jocarsa/jocarsa-lightsteelblue](https://github.com/jocarsa/jocarsa-lightsteelblue)
