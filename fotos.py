@@ -134,7 +134,6 @@ class EnhancedImageBrowser:
 
         # Configure row height so that 64px-high thumbnails are visible
         style = ttkb.Style()
-        # Setting rowheight slightly more than 64 to have spacing (e.g. 70 or 72)
         style.configure("Treeview", rowheight=72)
 
         self.folder_tree = ttkb.Treeview(self.left_frame, show="tree")
@@ -306,9 +305,6 @@ class EnhancedImageBrowser:
         # Save/Cancel buttons
         def save_changes():
             """Save the changes to config, update bindings, close window."""
-            # Validate no empty fields, or user might unbind
-            # If user wants to intentionally remove a hotkey, that's possible,
-            # but let's at least ensure they're not using the same one for everything.
             self.config["prev_photo"] = prev_var.get() or "Left"
             self.config["next_photo"] = next_var.get() or "Right"
             self.config["save_photo"] = save_var.get() or "z"
@@ -396,7 +392,11 @@ class EnhancedImageBrowser:
             self.folder_tree.insert("", "end", iid=str(idx), text=fname)
 
     def populate_seleccion_tree(self):
-        """ Populate the right treeview with files in the seleccion folder """
+        """
+        Populate the right treeview with files in the seleccion folder.
+        We also assign iid=str(idx) so we can directly match items
+        in generate_thumbnails via `if str(idx) in tree.get_children():`
+        """
         self.seleccion_tree.delete(*self.seleccion_tree.get_children())
         supported_extensions = ('.jpg', '.jpeg', '.JPG', '.JPEG')
         if os.path.exists(self.seleccion_folder):
@@ -405,8 +405,9 @@ class EnhancedImageBrowser:
             )
         else:
             self.seleccion_list = []
-        for fname in self.seleccion_list:
-            self.seleccion_tree.insert("", "end", text=fname)
+
+        for idx, fname in enumerate(self.seleccion_list):
+            self.seleccion_tree.insert("", "end", iid=str(idx), text=fname)
 
     def on_tree_select(self, event):
         """
@@ -445,7 +446,7 @@ class EnhancedImageBrowser:
 
     def generate_thumbnails(self, folder_path, image_list, thumb_dict, tree, subfolder_name):
         """
-        Generates thumbnail images in `folder_path/subfolder_name`.  
+        Generates thumbnail images in `folder_path/subfolder_name`.
         Then updates the TreeView items with the thumbnail images.
         """
         if not folder_path:
@@ -475,17 +476,14 @@ class EnhancedImageBrowser:
             # Now load the thumbnail into memory and update the dict
             try:
                 with Image.open(thumb_path) as thumb_img:
-                    # Keep a reference to the PhotoImage
                     tk_thumb = ImageTk.PhotoImage(thumb_img)
                     thumb_dict[filename] = tk_thumb
 
-                # If it's the left folder tree, items have iids = str(idx).
-                # If it's the seleccion tree, items are identified by text=filename.
-                # We'll try to match on both possibilities:
+                # Attempt to update by iid=str(idx) first
                 if str(idx) in tree.get_children():
                     tree.item(str(idx), image=tk_thumb)
                 else:
-                    # Might be in the right tree
+                    # fallback: match by the 'text' if we can't find a matching iid
                     for item_id in tree.get_children():
                         if tree.item(item_id, "text") == filename:
                             tree.item(item_id, image=tk_thumb)
@@ -614,7 +612,6 @@ class EnhancedImageBrowser:
         """
         for item_id in self.folder_tree.get_children():
             self.folder_tree.selection_remove(item_id)
-        # If already selected, no need to reselect
         if str(self.current_index) not in self.folder_tree.selection():
             self.folder_tree.selection_set(str(self.current_index))
         self.folder_tree.see(str(self.current_index))
@@ -855,7 +852,7 @@ class EnhancedImageBrowser:
 
     def build_destination_filename_rename(self, source_path, original_name):
         """
-        Build a new filename using EXIF date if available. 
+        Build a new filename using EXIF date if available.
         If no EXIF date is found, return the original_name (skip rename).
         """
         try:
