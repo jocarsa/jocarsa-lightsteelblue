@@ -91,8 +91,8 @@ class EnhancedImageBrowser:
         welcome.title("Bienvenido")
         
         # Define window size
-        width = 400
-        height = 300
+        width = 600
+        height = 400
 
         # Prevent window from being resizable
         welcome.resizable(False, False)
@@ -120,7 +120,7 @@ class EnhancedImageBrowser:
             
             logo_img = Image.open(logo_path)
             # Resize the logo to fit within the window (e.g., 150x150 pixels)
-            logo_img = logo_img.resize((150, 150), Image.Resampling.LANCZOS)
+            logo_img = logo_img.resize((300, 300), Image.Resampling.LANCZOS)
             self.logo_photo = ImageTk.PhotoImage(logo_img)
             
             logo_label = ttkb.Label(content_frame, image=self.logo_photo)
