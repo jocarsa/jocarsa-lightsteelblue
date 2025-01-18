@@ -86,6 +86,9 @@ class EnhancedImageBrowser:
         self.dragging = False
         self.auto_fit = True  # Flag to control auto-fitting
 
+        # Caching for exposure-adjusted images
+        self.exposure_cache = {}  # Diccionario para almacenar imágenes ajustadas
+
         # Crear una imagen de marcador de posición
         self.placeholder_image = self.create_placeholder_image()
 
@@ -450,8 +453,9 @@ class EnhancedImageBrowser:
 
         def denoise_thread():
             try:
-                # Apply denoise without modifying the original image
+                # Apply exposure
                 pil_img = self.apply_exposure(self.original_image_pil, self.exposure_factor)
+                # Apply denoise
                 denoised_img = denoise.denoise_image(
                     pil_img,
                     radius=radius,
@@ -474,8 +478,9 @@ class EnhancedImageBrowser:
 
         def denoise_thread():
             try:
-                # Apply denoise and update the original image
+                # Apply exposure
                 pil_img = self.apply_exposure(self.original_image_pil, self.exposure_factor)
+                # Apply denoise
                 denoised_img = denoise.denoise_image(
                     pil_img,
                     radius=radius,
@@ -921,43 +926,78 @@ class EnhancedImageBrowser:
             self.redisplay_with_exposure()
 
     def redisplay_with_exposure(self):
-        """Apply exposure and optional denoising, then show."""
+        """Aplica la exposición y opcionalmente la reducción de ruido en un hilo de fondo."""
         if not self.original_image_pil:
             return
-        pil_img = self.apply_exposure(self.original_image_pil, self.exposure_factor)
-        if self.enable_denoise_var.get():
-            # Apply denoise in a separate thread to avoid freezing the UI
-            threading.Thread(
-                target=self.apply_denoise_effect,
-                args=(pil_img,),
-                daemon=True
-            ).start()
-        else:
-            self.update_image_on_canvas(pil_img)
+
+        # Clonar la imagen original para evitar conflictos
+        pil_img = self.original_image_pil.copy()
+
+        # Definir la función que realizará el procesamiento
+        def process_image():
+            try:
+                # Aplicar exposición con caching
+                pil_adjusted = self.apply_exposure(pil_img, self.exposure_factor)
+                
+                # Aplicar reducción de ruido si está habilitado
+                if self.enable_denoise_var.get():
+                    pil_adjusted = denoise.denoise_image(
+                        pil_adjusted,
+                        radius=self.denoise_radius_var.get(),
+                        tolerance=self.denoise_tol_var.get(),
+                        mix=self.denoise_mix_var.get()
+                    )
+                
+                # Actualizar la imagen en el hilo principal
+                self.root.after(0, lambda: self.update_image_on_canvas(pil_adjusted))
+                self.update_status("Exposición aplicada correctamente.")
+            except Exception as e:
+                self.update_status(f"Exposure Processing Error: {e}")
+                self.root.after(0, lambda: messagebox.showerror("Error", f"Failed to apply exposure.\n{e}"))
+
+        # Iniciar el hilo
+        threading.Thread(target=process_image, daemon=True).start()
 
     def apply_exposure(self, pil_img, factor):
-        if np is not None:
-            arr = np.array(pil_img, dtype=np.float32)
-            arr *= factor
-            arr = np.clip(arr, 0, 255).astype(np.uint8)
-            return Image.fromarray(arr)
-        else:
-            enhancer = ImageEnhance.Brightness(pil_img)
-            return enhancer.enhance(factor)
-
-    def apply_denoise_effect(self, pil_img):
+        """Aplica el ajuste de exposición utilizando OpenCV con caching."""
         try:
-            denoised_img = denoise.denoise_image(
-                pil_img,
-                radius=self.denoise_radius_var.get(),
-                tolerance=self.denoise_tol_var.get(),
-                mix=self.denoise_mix_var.get()
-            )
-            self.update_image_on_canvas(denoised_img)
-            self.update_status("Reducción de ruido aplicada.")
+            # Redondear el factor para evitar demasiadas entradas en caché
+            factor_key = round(factor, 2)
+            
+            if factor_key in self.exposure_cache:
+                return self.exposure_cache[factor_key]
+            
+            if cv2:
+                # Convertir PIL a OpenCV (BGR)
+                open_cv_image = np.array(pil_img)
+                open_cv_image = cv2.cvtColor(open_cv_image, cv2.COLOR_RGB2BGR)
+                
+                # Ajustar exposición
+                adjusted = cv2.convertScaleAbs(open_cv_image, alpha=factor_key, beta=0)
+                
+                # Convertir de nuevo a PIL (RGB)
+                adjusted = cv2.cvtColor(adjusted, cv2.COLOR_BGR2RGB)
+                pil_adjusted = Image.fromarray(adjusted)
+            elif np:
+                # Usar NumPy si OpenCV no está disponible
+                arr = np.asarray(pil_img).astype(np.float32)
+                arr *= factor_key
+                np.clip(arr, 0, 255, out=arr)
+                arr = arr.astype(np.uint8)
+                pil_adjusted = Image.fromarray(arr)
+            else:
+                # Fallback a PIL si OpenCV y NumPy no están disponibles
+                enhancer = ImageEnhance.Brightness(pil_img)
+                pil_adjusted = enhancer.enhance(factor_key)
+            
+            # Almacenar en caché
+            self.exposure_cache[factor_key] = pil_adjusted
+            
+            return pil_adjusted
         except Exception as e:
-            self.update_status(f"Denoising Error: {e}")
-            messagebox.showerror("Error", f"Failed to apply denoising.\n{e}")
+            self.update_status(f"Exposure Adjustment Error: {e}")
+            messagebox.showerror("Exposure Error", f"Failed to adjust exposure.\n{e}")
+            return pil_img  # Retornar la imagen original en caso de error
 
     # -------------------------
     # Selection Rectangle
