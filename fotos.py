@@ -89,6 +89,12 @@ class EnhancedImageBrowser:
         # Caching for exposure-adjusted images
         self.exposure_cache = {}  # Diccionario para almacenar imágenes ajustadas
 
+        # Store current image path
+        self.current_image_path = ""  # Added to track current image
+
+        # Lista para almacenar referencias de PhotoImage y evitar garbage collection
+        self.photo_images = []
+
         # Crear una imagen de marcador de posición
         self.placeholder_image = self.create_placeholder_image()
 
@@ -289,7 +295,7 @@ class EnhancedImageBrowser:
         row_height = thumbnail_size + padding
         style.configure("Treeview", rowheight=row_height)
 
-        self.folder_tree = ttkb.Treeview(self.left_frame, show="tree")
+        self.folder_tree = ttkb.Treeview(self.left_frame, show="tree", selectmode='browse')  # Añadido selectmode='browse'
         self.folder_tree.pack(side=tk.LEFT, fill=tk.Y, expand=True)
 
         self.folder_scroll = ttkb.Scrollbar(self.left_frame, orient="vertical", command=self.folder_tree.yview)
@@ -307,7 +313,7 @@ class EnhancedImageBrowser:
         self.right_frame = ttkb.Frame(self.main_frame)
         self.right_frame.pack(side=tk.LEFT, fill=tk.Y, padx=5, pady=5)
 
-        self.seleccion_tree = ttkb.Treeview(self.right_frame, show="tree")
+        self.seleccion_tree = ttkb.Treeview(self.right_frame, show="tree", selectmode='browse')  # Añadido selectmode='browse'
         self.seleccion_tree.pack(side=tk.LEFT, fill=tk.Y, expand=True)
 
         self.seleccion_scroll = ttkb.Scrollbar(self.right_frame, orient="vertical", command=self.seleccion_tree.yview)
@@ -454,7 +460,7 @@ class EnhancedImageBrowser:
         def denoise_thread():
             try:
                 # Apply exposure
-                pil_img = self.apply_exposure(self.original_image_pil, self.exposure_factor)
+                pil_img = self.apply_exposure(self.original_image_pil, self.exposure_factor, self.current_image_path)
                 # Apply denoise
                 denoised_img = denoise.denoise_image(
                     pil_img,
@@ -479,7 +485,7 @@ class EnhancedImageBrowser:
         def denoise_thread():
             try:
                 # Apply exposure
-                pil_img = self.apply_exposure(self.original_image_pil, self.exposure_factor)
+                pil_img = self.apply_exposure(self.original_image_pil, self.exposure_factor, self.current_image_path)
                 # Apply denoise
                 denoised_img = denoise.denoise_image(
                     pil_img,
@@ -564,6 +570,10 @@ class EnhancedImageBrowser:
         self.root.bind(f"<{self.config['increase_exposure']}>", self.increase_exposure)
         self.root.bind(f"<{self.config['decrease_exposure']}>", self.decrease_exposure)
         self.root.bind(f"<{self.config['delete_photo']}>", self.delete_image)
+        
+        # Añadir binding para flechas arriba y abajo
+        self.root.bind("<Up>", self.show_previous_image)
+        self.root.bind("<Down>", self.show_next_image)
 
     # -------------------------
     # Config Window
@@ -698,6 +708,7 @@ class EnhancedImageBrowser:
         for idx, fname in enumerate(self.image_list):
             thumbnail = self.thumb_images_left.get(fname, self.placeholder_image)
             self.folder_tree.insert("", "end", iid=str(idx), text=fname, image=thumbnail)
+            print(f"Inserted into Treeview: iid={idx}, fname={fname}")  # Depuración
 
     def populate_seleccion_tree(self):
         self.seleccion_tree.delete(*self.seleccion_tree.get_children())
@@ -714,8 +725,10 @@ class EnhancedImageBrowser:
 
     def on_tree_select(self, event):
         item_id = self.folder_tree.focus()
+        print(f"Treeview Select Event Triggered: item_id={item_id}")  # Depuración
         if item_id.isdigit():
             selected_index = int(item_id)
+            print(f"Selected Index: {selected_index}")  # Depuración
             if selected_index != self.current_index:
                 self.current_index = selected_index
                 self.display_image(self.current_index, fit=True)
@@ -774,6 +787,7 @@ class EnhancedImageBrowser:
                     with Image.open(thumb_path) as thumb_img:
                         tk_thumb = ImageTk.PhotoImage(thumb_img)
                         thumb_dict[filename] = tk_thumb
+                        self.photo_images.append(tk_thumb)  # Mantener referencia
                     # Update the Treeview item with the new thumbnail
                     for item_id in tree.get_children():
                         if tree.item(item_id, "text") == filename:
@@ -789,9 +803,12 @@ class EnhancedImageBrowser:
     # -------------------------
     def display_image(self, index, fit=False):
         if not self.image_list:
+            print("No images to display.")  # Depuración
             return
 
         image_path = os.path.join(self.folder_path, self.image_list[index])
+        self.current_image_path = image_path  # Store the current image path
+        print(f"Displaying image: {image_path}")  # Depuración
         try:
             pil_img = Image.open(image_path)
             pil_img = self.apply_exif_orientation(pil_img)
@@ -808,6 +825,7 @@ class EnhancedImageBrowser:
             self.update_progress_bar()
         except Exception as e:
             self.update_status(f"Failed to load image: {self.image_list[self.current_index]}")
+            print(f"Error loading image {self.image_list[index]}: {e}")  # Depuración
             messagebox.showerror("Error", f"Failed to load image.\n{e}")
 
     def apply_exif_orientation(self, image):
@@ -832,7 +850,9 @@ class EnhancedImageBrowser:
         scaled_h = int(h * self.zoom_scale)
         display_img = pil_img.resize((scaled_w, scaled_h), self.get_resample_filter())
 
-        self.display_image_tk = ImageTk.PhotoImage(display_img)
+        photo_image = ImageTk.PhotoImage(display_img)
+        self.photo_images.append(photo_image)  # Mantener la referencia
+        self.display_image_tk = photo_image
 
         self.image_canvas.delete("all")
         # Calculate center position
@@ -847,6 +867,12 @@ class EnhancedImageBrowser:
 
         # Redraw selection rectangle if we had one
         self.redraw_selection()
+
+        # For depuración: imprimir que la imagen se ha actualizado
+        print(f"Image on canvas updated: {pil_img}")
+
+        # Forzar la actualización de la interfaz
+        self.image_canvas.update_idletasks()
 
     def get_resample_filter(self):
         try:
@@ -871,7 +897,7 @@ class EnhancedImageBrowser:
         if cw < 10 or ch < 10:
             return
 
-        pil_img = self.apply_exposure(self.original_image_pil, self.exposure_factor)
+        pil_img = self.apply_exposure(self.original_image_pil, self.exposure_factor, self.current_image_path)
 
         # Calculate scale to fit
         img_w, img_h = pil_img.size
@@ -903,6 +929,7 @@ class EnhancedImageBrowser:
         if str(self.current_index) not in self.folder_tree.selection():
             self.folder_tree.selection_set(str(self.current_index))
         self.folder_tree.see(str(self.current_index))
+        print(f"Highlighted Treeview item: {self.current_index}")  # Depuración
 
     # -------------------------
     # Exposure Adjustments
@@ -930,16 +957,16 @@ class EnhancedImageBrowser:
         if not self.original_image_pil:
             return
 
-        # Clonar la imagen original para evitar conflictos
+        # Clone the original image to avoid conflicts
         pil_img = self.original_image_pil.copy()
 
-        # Definir la función que realizará el procesamiento
+        # Define the function that will perform the processing
         def process_image():
             try:
-                # Aplicar exposición con caching
-                pil_adjusted = self.apply_exposure(pil_img, self.exposure_factor)
+                # Apply exposure with caching
+                pil_adjusted = self.apply_exposure(pil_img, self.exposure_factor, self.current_image_path)
                 
-                # Aplicar reducción de ruido si está habilitado
+                # Apply noise reduction if enabled
                 if self.enable_denoise_var.get():
                     pil_adjusted = denoise.denoise_image(
                         pil_adjusted,
@@ -948,56 +975,60 @@ class EnhancedImageBrowser:
                         mix=self.denoise_mix_var.get()
                     )
                 
-                # Actualizar la imagen en el hilo principal
+                # Update the image in the main thread
                 self.root.after(0, lambda: self.update_image_on_canvas(pil_adjusted))
                 self.update_status("Exposición aplicada correctamente.")
             except Exception as e:
                 self.update_status(f"Exposure Processing Error: {e}")
                 self.root.after(0, lambda: messagebox.showerror("Error", f"Failed to apply exposure.\n{e}"))
 
-        # Iniciar el hilo
+        # Start the thread
         threading.Thread(target=process_image, daemon=True).start()
 
-    def apply_exposure(self, pil_img, factor):
+        # For debugging: confirm that the thread has started
+        print("Started exposure adjustment thread.")
+
+    def apply_exposure(self, pil_img, factor, image_path):
         """Aplica el ajuste de exposición utilizando OpenCV con caching."""
         try:
             # Redondear el factor para evitar demasiadas entradas en caché
             factor_key = round(factor, 2)
+            cache_key = (image_path, factor_key)
             
-            if factor_key in self.exposure_cache:
-                return self.exposure_cache[factor_key]
+            if cache_key in self.exposure_cache:
+                return self.exposure_cache[cache_key]
             
             if cv2:
-                # Convertir PIL a OpenCV (BGR)
+                # Convert PIL to OpenCV (BGR)
                 open_cv_image = np.array(pil_img)
                 open_cv_image = cv2.cvtColor(open_cv_image, cv2.COLOR_RGB2BGR)
                 
-                # Ajustar exposición
+                # Adjust exposure
                 adjusted = cv2.convertScaleAbs(open_cv_image, alpha=factor_key, beta=0)
                 
-                # Convertir de nuevo a PIL (RGB)
+                # Convert back to PIL (RGB)
                 adjusted = cv2.cvtColor(adjusted, cv2.COLOR_BGR2RGB)
                 pil_adjusted = Image.fromarray(adjusted)
             elif np:
-                # Usar NumPy si OpenCV no está disponible
+                # Use NumPy if OpenCV not available
                 arr = np.asarray(pil_img).astype(np.float32)
                 arr *= factor_key
                 np.clip(arr, 0, 255, out=arr)
                 arr = arr.astype(np.uint8)
                 pil_adjusted = Image.fromarray(arr)
             else:
-                # Fallback a PIL si OpenCV y NumPy no están disponibles
+                # Fallback to PIL if OpenCV and NumPy not available
                 enhancer = ImageEnhance.Brightness(pil_img)
                 pil_adjusted = enhancer.enhance(factor_key)
             
-            # Almacenar en caché
-            self.exposure_cache[factor_key] = pil_adjusted
+            # Store in cache
+            self.exposure_cache[cache_key] = pil_adjusted
             
             return pil_adjusted
         except Exception as e:
             self.update_status(f"Exposure Adjustment Error: {e}")
             messagebox.showerror("Exposure Error", f"Failed to adjust exposure.\n{e}")
-            return pil_img  # Retornar la imagen original en caso de error
+            return pil_img  # Return original image in case of error
 
     # -------------------------
     # Selection Rectangle
@@ -1099,7 +1130,7 @@ class EnhancedImageBrowser:
         try:
             full_img = Image.open(source_image)
             full_img = self.apply_exif_orientation(full_img)
-            full_img = self.apply_exposure(full_img, self.exposure_factor)
+            full_img = self.apply_exposure(full_img, self.exposure_factor, source_image)
             # Crop if selection
             final_img = self.maybe_crop(full_img)
 
@@ -1382,6 +1413,61 @@ class EnhancedImageBrowser:
         except Exception as e:
             self.update_status(f"Failed to open online help: {e}")
             messagebox.showerror("Error", f"Failed to open online help.\n{e}")
+
+    # -------------------------
+    # Floating Denoise Window
+    # -------------------------
+    # (Already implemented above)
+
+    # -------------------------
+    # Info Window
+    # -------------------------
+    # (Already implemented above)
+
+    # -------------------------
+    # Selection Rectangle
+    # -------------------------
+    # (Already implemented above)
+
+    # -------------------------
+    # Panning & Zoom
+    # -------------------------
+    # (Already implemented above)
+
+    # -------------------------
+    # Copy / Save Image
+    # -------------------------
+    # (Already implemented above)
+
+    # -------------------------
+    # Exposure Adjustments
+    # -------------------------
+    # (Already implemented above)
+
+    # -------------------------
+    # Image Display
+    # -------------------------
+    # (Already implemented above)
+
+    # -------------------------
+    # Rename All by EXIF
+    # -------------------------
+    # (Already implemented above)
+
+    # -------------------------
+    # Rename All Photos to EXIF
+    # -------------------------
+    # (Already implemented above)
+
+    # -------------------------
+    # Delete Image
+    # -------------------------
+    # (Already implemented above)
+
+    # -------------------------
+    # Other Methods (No Changes)
+    # -------------------------
+    # No changes needed for methods like maybe_crop, etc.
 
 def main():
     # Inicializar la ventana con el tema guardado en la configuración o el por defecto
