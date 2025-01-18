@@ -20,6 +20,7 @@ except ImportError:
     cv2 = None  # fallback if not available
 
 import colorsys
+import webbrowser  # New import
 
 # Import denoise from external file
 import denoise  # Make sure denoise.py is in the same directory
@@ -32,6 +33,13 @@ from ttkbootstrap import Style
 CONFIG_FILENAME = "config.json"
 SETTINGS_FILENAME = "settings.json"
 
+# Definición de temas disponibles
+AVAILABLE_THEMES = [
+    'cosmo', 'flatly', 'journal', 'litera', 'lumen', 'minty', 'pulse',
+    'sandstone', 'united', 'yeti', 'morph', 'simplex', 'cerculean',
+    'solar', 'superhero', 'darkly', 'cyborg', 'vapor'
+]
+
 class EnhancedImageBrowser:
     def __init__(self, root):
         self.root = root
@@ -43,6 +51,10 @@ class EnhancedImageBrowser:
         # 2) Load or Create Settings
         self.settings = self.load_settings()
 
+        # Initialize ttkbootstrap style
+        self.style = ttkb.Style()
+        self.style.theme_use(self.config.get("theme", "darkly"))
+
         # Variables
         self.folder_path = ""
         self.seleccion_folder = ""
@@ -51,7 +63,7 @@ class EnhancedImageBrowser:
         self.current_index = 0
         self.original_image_pil = None  
         self.display_image_tk = None    
-        self.exposure_factor = 1.0      
+        self.exposure_factor = 1.0      # Reset exposure factor on photo change
         self.selection_coords = None    
         self.canvas_rect_id = None      
 
@@ -74,13 +86,25 @@ class EnhancedImageBrowser:
         self.dragging = False
         self.auto_fit = True  # Flag to control auto-fitting
 
-        # Create UI
+        # Crear una imagen de marcador de posición
+        self.placeholder_image = self.create_placeholder_image()
+
+        # Crear UI
         self.create_widgets()
         self.setup_layout()
         self.bind_events()
 
         # Show floating welcome window **after** widgets are created
         self.show_welcome_window()
+
+    # -------------------------
+    # Crear Imagen de Marcador de Posición
+    # -------------------------
+    def create_placeholder_image(self):
+        """Crea una imagen de marcador de posición para usar en el Treeview."""
+        img = Image.new('RGB', (64, 64), color='gray')
+        draw = ImageOps.expand(img, border=2, fill='black')
+        return ImageTk.PhotoImage(draw)
 
     # -------------------------
     # Welcome Window
@@ -92,7 +116,7 @@ class EnhancedImageBrowser:
         
         # Define window size
         width = 600
-        height = 400
+        height = 600
 
         # Prevent window from being resizable
         welcome.resizable(False, False)
@@ -119,7 +143,7 @@ class EnhancedImageBrowser:
                 raise FileNotFoundError(f"Logo image '{logo_path}' not found.")
             
             logo_img = Image.open(logo_path)
-            # Resize the logo to fit within the window (e.g., 150x150 pixels)
+            # Resize the logo to fit within the window (e.g., 300x300 pixels)
             logo_img = logo_img.resize((300, 300), Image.Resampling.LANCZOS)
             self.logo_photo = ImageTk.PhotoImage(logo_img)
             
@@ -136,7 +160,15 @@ class EnhancedImageBrowser:
             text="jocarsa | lightsteelblue", 
             font=("Helvetica", 16, "bold")
         )
-        app_name_label.pack(pady=(0, 20))
+        app_name_label.pack(pady=(0, 10))  # Adjusted padding
+        
+        # Display the author name
+        author_label = ttkb.Label(
+            content_frame, 
+            text="(c) 2025 Jose Vicente Carratala", 
+            font=("Helvetica", 12)
+        )
+        author_label.pack(pady=(0, 20))
         
         # Add an "Aceptar" button to close the welcome window
         accept_button = ttkb.Button(
@@ -157,7 +189,8 @@ class EnhancedImageBrowser:
             "save_photo": "z",
             "increase_exposure": "KP_Add",
             "decrease_exposure": "KP_Subtract",
-            "delete_photo": "q"  # Added default delete shortcut
+            "delete_photo": "q",  # Added default delete shortcut
+            "theme": "darkly"      # Añadido tema por defecto
         }
         if os.path.exists(CONFIG_FILENAME):
             try:
@@ -225,7 +258,7 @@ class EnhancedImageBrowser:
         self.header_frame = ttkb.Frame(self.root)
         self.header_frame.pack(side=tk.TOP, fill=tk.X)
 
-        self.progress_label = ttkb.Label(self.header_frame, text="Progress:")
+        self.progress_label = ttkb.Label(self.header_frame, text="Progreso:")
         self.progress_label.pack(side=tk.LEFT, padx=5)
 
         self.progress_var = tk.DoubleVar(value=0.0)
@@ -241,12 +274,17 @@ class EnhancedImageBrowser:
         self.main_frame = ttkb.Frame(self.root)
         self.main_frame.pack(fill=tk.BOTH, expand=True)
 
+        # Izquierda y Derecha serán Frame con Treeview mostrando imágenes y texto
         # Left column: Treeview for folder images
         self.left_frame = ttkb.Frame(self.main_frame)
         self.left_frame.pack(side=tk.LEFT, fill=tk.Y, padx=5, pady=5)
 
         style = ttkb.Style()
-        style.configure("Treeview", rowheight=72)
+        # Ajustar el rowheight basado en el tamaño de la miniatura (64 píxeles) + padding
+        thumbnail_size = 64
+        padding = 8  # Para margen alrededor de la imagen
+        row_height = thumbnail_size + padding
+        style.configure("Treeview", rowheight=row_height)
 
         self.folder_tree = ttkb.Treeview(self.left_frame, show="tree")
         self.folder_tree.pack(side=tk.LEFT, fill=tk.Y, expand=True)
@@ -288,6 +326,7 @@ class EnhancedImageBrowser:
         # Archivo Menu
         archivo_menu = tk.Menu(self.menubar, tearoff=0)
         archivo_menu.add_command(label="Seleccionar carpeta", command=self.select_folder)
+        archivo_menu.add_command(label="Renombrar todas las fotos a EXIF", command=self.rename_all_photos_to_exif)  # Nueva opción
         archivo_menu.add_separator()
         archivo_menu.add_command(label="Salir", command=self.root.quit)
         self.menubar.add_cascade(label="Archivo", menu=archivo_menu)
@@ -307,9 +346,47 @@ class EnhancedImageBrowser:
         ayuda_menu = tk.Menu(self.menubar, tearoff=0)
         ayuda_menu.add_command(label="Información", command=self.show_info)
         ayuda_menu.add_command(label="Configuración", command=self.open_config_window)
+        ayuda_menu.add_command(label="Ayuda online", command=self.open_online_help)  # New menu item
         self.menubar.add_cascade(label="Ayuda", menu=ayuda_menu)
 
+        # -------------------------
+        # Tema Visual Menu
+        # -------------------------
+        tema_visual_menu = tk.Menu(self.menubar, tearoff=0)
+        for theme in AVAILABLE_THEMES:
+            tema_visual_menu.add_command(
+                label=theme.capitalize(),
+                command=lambda t=theme: self.change_theme(t)
+            )
+        self.menubar.add_cascade(label="Tema Visual", menu=tema_visual_menu)
+
         self.root.config(menu=self.menubar)
+
+    # -------------------------
+    # Cambiar Tema
+    # -------------------------
+    def change_theme(self, theme_name):
+        """Cambia el tema de la aplicación."""
+        try:
+            self.style.theme_use(theme_name)
+            self.config["theme"] = theme_name  # Actualiza el tema en la configuración
+            self.save_config()                # Guarda la configuración actualizada
+            self.update_status(f"Tema cambiado a '{theme_name}'.")
+        except Exception as e:
+            self.update_status(f"Error al cambiar el tema a '{theme_name}': {e}")
+            messagebox.showerror("Error", f"No se pudo cambiar el tema a '{theme_name}'.\n{e}")
+
+    # -------------------------
+    # Open Online Help
+    # -------------------------
+    def open_online_help(self):
+        url = "https://github.com/jocarsa/jocarsa-lightsteelblue"
+        try:
+            webbrowser.open(url, new=2)  # new=2 opens in a new tab, if possible
+            self.update_status(f"Opened online help: {url}")
+        except Exception as e:
+            self.update_status(f"Failed to open online help: {e}")
+            messagebox.showerror("Error", f"Failed to open online help.\n{e}")
 
     # -------------------------
     # Floating Denoise Window
@@ -614,7 +691,8 @@ class EnhancedImageBrowser:
     def populate_folder_tree(self):
         self.folder_tree.delete(*self.folder_tree.get_children())
         for idx, fname in enumerate(self.image_list):
-            self.folder_tree.insert("", "end", iid=str(idx), text=fname)
+            thumbnail = self.thumb_images_left.get(fname, self.placeholder_image)
+            self.folder_tree.insert("", "end", iid=str(idx), text=fname, image=thumbnail)
 
     def populate_seleccion_tree(self):
         self.seleccion_tree.delete(*self.seleccion_tree.get_children())
@@ -626,7 +704,8 @@ class EnhancedImageBrowser:
         else:
             self.seleccion_list = []
         for idx, fname in enumerate(self.seleccion_list):
-            self.seleccion_tree.insert("", "end", iid=str(idx), text=fname)
+            thumbnail = self.thumb_images_right.get(fname, self.placeholder_image)
+            self.seleccion_tree.insert("", "end", iid=str(idx), text=fname, image=thumbnail)
 
     def on_tree_select(self, event):
         item_id = self.folder_tree.focus()
@@ -638,9 +717,11 @@ class EnhancedImageBrowser:
 
     def on_tree_select_seleccion(self, event):
         item_id = self.seleccion_tree.focus()
-        if item_id:
-            fname = self.seleccion_tree.item(item_id, "text")
-            self.update_status(f"'seleccion' folder item selected: {fname}")
+        if item_id.isdigit():
+            selected_index = int(item_id)
+            if selected_index < len(self.seleccion_list):
+                fname = self.seleccion_list[selected_index]
+                self.update_status(f"'seleccion' folder item selected: {fname}")
 
     # -------------------------
     # Thumbnails Generation
@@ -688,10 +769,9 @@ class EnhancedImageBrowser:
                     with Image.open(thumb_path) as thumb_img:
                         tk_thumb = ImageTk.PhotoImage(thumb_img)
                         thumb_dict[filename] = tk_thumb
-                    # Try to find the item in the tree
+                    # Update the Treeview item with the new thumbnail
                     for item_id in tree.get_children():
-                        item_text = tree.item(item_id, "text")
-                        if item_text == filename:
+                        if tree.item(item_id, "text") == filename:
                             tree.item(item_id, image=tk_thumb)
                             break
                 except Exception as e:
@@ -711,6 +791,7 @@ class EnhancedImageBrowser:
             pil_img = Image.open(image_path)
             pil_img = self.apply_exif_orientation(pil_img)
             self.original_image_pil = pil_img
+            self.exposure_factor = 1.0  # Reset exposure factor
             if fit:
                 self.auto_fit = True
                 self.fit_image_to_canvas()
@@ -828,7 +909,7 @@ class EnhancedImageBrowser:
                 self.exposure_factor = 5.0
             self.update_status(f"Exposure increased to {self.exposure_factor:.2f}")
             self.auto_fit = False  # User is manually adjusting
-            self.update_image_on_canvas(self.original_image_pil)
+            self.redisplay_with_exposure()
 
     def decrease_exposure(self, event=None):
         if self.original_image_pil:
@@ -837,7 +918,7 @@ class EnhancedImageBrowser:
                 self.exposure_factor = 0.1
             self.update_status(f"Exposure decreased to {self.exposure_factor:.2f}")
             self.auto_fit = False  # User is manually adjusting
-            self.update_image_on_canvas(self.original_image_pil)
+            self.redisplay_with_exposure()
 
     def redisplay_with_exposure(self):
         """Apply exposure and optional denoising, then show."""
@@ -1133,6 +1214,71 @@ class EnhancedImageBrowser:
         return original_name
 
     # -------------------------
+    # Rename All Photos to EXIF
+    # -------------------------
+    def rename_all_photos_to_exif(self):
+        if not self.folder_path:
+            self.update_status("No folder selected.")
+            messagebox.showwarning("Advertencia", "No hay carpeta seleccionada para renombrar las fotos.")
+            return
+
+        supported_extensions = ('.jpg', '.jpeg', '.JPG', '.JPEG')
+        all_files = [f for f in os.listdir(self.folder_path) if f.lower().endswith(supported_extensions)]
+
+        if not all_files:
+            self.update_status("No hay fotos JPG para renombrar en la carpeta seleccionada.")
+            messagebox.showinfo("Sin Fotos", "No hay fotos JPG para renombrar en la carpeta seleccionada.")
+            return
+
+        renamed_count = 0
+        errors = []
+        for old_name in all_files:
+            old_path = os.path.join(self.folder_path, old_name)
+            try:
+                new_name = self.build_destination_filename_rename(old_path, old_name)
+                if new_name == old_name:
+                    continue  # Skip if no renaming needed
+
+                new_path = os.path.join(self.folder_path, new_name)
+                base, ext = os.path.splitext(new_name)
+                counter = 1
+                # Manejar nombres duplicados
+                while os.path.exists(new_path):
+                    new_name = f"{base}_{counter}{ext}"
+                    new_path = os.path.join(self.folder_path, new_name)
+                    counter += 1
+
+                os.rename(old_path, new_path)
+                renamed_count += 1
+            except Exception as e:
+                errors.append((old_name, str(e)))
+
+        # Recargar la lista de imágenes
+        self.load_images()
+        self.populate_folder_tree()
+
+        # Regenerar miniaturas
+        self.thumb_images_left.clear()  # Clear existing thumbnails
+        self.start_thumbnail_generation(
+            folder_path=self.folder_path,
+            image_list=self.image_list,
+            thumb_dict=self.thumb_images_left,
+            tree=self.folder_tree
+        )
+
+        # Feedback al usuario
+        if renamed_count > 0 and not errors:
+            self.update_status(f"Renombradas {renamed_count} foto(s) basadas en EXIF en '{self.folder_path}'.")
+            messagebox.showinfo("Renombrado Exitoso", f"Renombradas {renamed_count} foto(s) basadas en EXIF.")
+        elif renamed_count > 0 and errors:
+            error_messages = "\n".join([f"{name}: {msg}" for name, msg in errors])
+            self.update_status(f"Renombradas {renamed_count} foto(s) con algunos errores.")
+            messagebox.showwarning("Renombrado Parcial", f"Renombradas {renamed_count} foto(s) con algunos errores:\n{error_messages}")
+        else:
+            self.update_status("No se renombró ninguna foto (posiblemente sin información EXIF).")
+            messagebox.showinfo("Sin Renombrado", "No se renombró ninguna foto (posiblemente sin información EXIF).")
+
+    # -------------------------
     # Delete Image
     # -------------------------
     def delete_image(self, event=None):
@@ -1185,8 +1331,31 @@ class EnhancedImageBrowser:
         self.status_var.set(message)
         self.root.update_idletasks()
 
+    # -------------------------
+    # Open Online Help (Added)
+    # -------------------------
+    def open_online_help(self):
+        url = "https://github.com/jocarsa/jocarsa-lightsteelblue"
+        try:
+            webbrowser.open(url, new=2)  # new=2 opens in a new tab, if possible
+            self.update_status(f"Opened online help: {url}")
+        except Exception as e:
+            self.update_status(f"Failed to open online help: {e}")
+            messagebox.showerror("Error", f"Failed to open online help.\n{e}")
+
 def main():
-    app = ttkb.Window(themename="darkly")
+    # Inicializar la ventana con el tema guardado en la configuración o el por defecto
+    if os.path.exists(CONFIG_FILENAME):
+        try:
+            with open(CONFIG_FILENAME, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+            initial_theme = config.get("theme", "darkly")
+        except:
+            initial_theme = "darkly"
+    else:
+        initial_theme = "darkly"
+
+    app = ttkb.Window(themename=initial_theme)
     EnhancedImageBrowser(app)
     app.mainloop()
 

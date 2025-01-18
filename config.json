@@ -3,5 +3,7 @@
   "prev_photo": "Left",
   "save_photo": "z",
   "increase_exposure": "KP_Add",
-  "decrease_exposure": "KP_Subtract"
+  "decrease_exposure": "KP_Subtract",
+  "delete_photo": "q",
+  "theme": "cosmo"
 }
