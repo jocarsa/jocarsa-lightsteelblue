@@ -1,3 +1,5 @@
 
 *.JPG
 *.jpg
+settings.json
+__pycache__/denoise.cpython-312.pyc

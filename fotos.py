@@ -7,10 +7,22 @@ from tkinter import filedialog, messagebox
 from datetime import datetime
 from PIL import Image, ImageTk, ImageOps, ImageEnhance
 
+# Attempt NumPy import
 try:
     import numpy as np
 except ImportError:
-    np = None  # If NumPy is not available, we'll use PIL's ImageEnhance for exposure adjustments.
+    np = None  # fallback if not available
+
+# Attempt OpenCV import
+try:
+    import cv2
+except ImportError:
+    cv2 = None  # fallback if not available
+
+import colorsys
+
+# Import denoise from external file
+import denoise  # Make sure denoise.py is in the same directory
 
 # ttkbootstrap imports
 import ttkbootstrap as ttkb
@@ -18,24 +30,18 @@ from ttkbootstrap.constants import *
 from ttkbootstrap import Style
 
 CONFIG_FILENAME = "config.json"
+SETTINGS_FILENAME = "settings.json"
 
 class EnhancedImageBrowser:
     def __init__(self, root):
         self.root = root
         self.root.title("jocarsa | lightsteelblue")
 
-        # -------------------------
         # 1) Load or Create Config
-        # -------------------------
-        self.config = self.load_config()  # loads user hotkeys from config.json
-        # Example structure of self.config:
-        # {
-        #   "next_photo": "Right",
-        #   "prev_photo": "Left",
-        #   "save_photo": "z",
-        #   "increase_exposure": "KP_Add",
-        #   "decrease_exposure": "KP_Subtract"
-        # }
+        self.config = self.load_config()
+
+        # 2) Load or Create Settings
+        self.settings = self.load_settings()
 
         # Variables
         self.folder_path = ""
@@ -43,42 +49,120 @@ class EnhancedImageBrowser:
         self.image_list = []
         self.seleccion_list = []
         self.current_index = 0
-        self.original_image_pil = None  # Store the original full PIL image
-        self.display_image_tk = None    # Store the currently displayed (resized) image as ImageTk
-        self.exposure_factor = 1.0      # Default exposure factor
-        self.selection_coords = None    # (x1, y1, x2, y2) in image's coordinate space
-        self.canvas_rect_id = None      # ID of the rectangle drawn on the canvas
+        self.original_image_pil = None  
+        self.display_image_tk = None    
+        self.exposure_factor = 1.0      
+        self.selection_coords = None    
+        self.canvas_rect_id = None      
 
-        # For storing thumbnail ImageTk references so they don't get garbage-collected
+        # Store thumbnail references
         self.thumb_images_left = {}
         self.thumb_images_right = {}
 
-        # UI setup
+        # Denoise parameters
+        self.enable_denoise_var = tk.BooleanVar(value=False)
+        self.denoise_radius_var = tk.IntVar(value=2)
+        self.denoise_tol_var = tk.IntVar(value=10)
+        self.denoise_mix_var = tk.DoubleVar(value=1.0)
+
+        # Zoom/pan states
+        self.zoom_scale = 1.0   # Current zoom factor
+        self.pan_offset_x = 0
+        self.pan_offset_y = 0
+        self.last_mouse_x = 0
+        self.last_mouse_y = 0
+        self.dragging = False
+        self.auto_fit = True  # Flag to control auto-fitting
+
+        # Create UI
         self.create_widgets()
         self.setup_layout()
-        # We will do key-binding AFTER widgets are created
         self.bind_events()
+
+        # Show floating welcome window **after** widgets are created
+        self.show_welcome_window()
+
+    # -------------------------
+    # Welcome Window
+    # -------------------------
+    def show_welcome_window(self):
+        """Create and display the centered welcome window with logo and application name."""
+        welcome = tk.Toplevel(self.root)
+        welcome.title("Bienvenido")
+        
+        # Define window size
+        width = 400
+        height = 300
+
+        # Prevent window from being resizable
+        welcome.resizable(False, False)
+        
+        # Center the window on the screen
+        welcome.update_idletasks()  # Ensure the window dimensions are calculated
+        screen_width = welcome.winfo_screenwidth()
+        screen_height = welcome.winfo_screenheight()
+        x = (screen_width // 2) - (width // 2)
+        y = (screen_height // 2) - (height // 2)
+        welcome.geometry(f"{width}x{height}+{x}+{y}")
+        
+        # Ensure the welcome window stays on top
+        welcome.attributes("-topmost", True)
+        
+        # Create a frame to hold the content
+        content_frame = ttkb.Frame(welcome)
+        content_frame.pack(expand=True, fill=tk.BOTH, padx=20, pady=20)
+        
+        # Load and display the logo image
+        try:
+            logo_path = "lightsteelbue.png"
+            if not os.path.exists(logo_path):
+                raise FileNotFoundError(f"Logo image '{logo_path}' not found.")
+            
+            logo_img = Image.open(logo_path)
+            # Resize the logo to fit within the window (e.g., 150x150 pixels)
+            logo_img = logo_img.resize((150, 150), Image.Resampling.LANCZOS)
+            self.logo_photo = ImageTk.PhotoImage(logo_img)
+            
+            logo_label = ttkb.Label(content_frame, image=self.logo_photo)
+            logo_label.pack(pady=(0, 10))
+        except Exception as e:
+            self.update_status(f"Could not load logo image: {e}")
+            # If the image fails to load, skip displaying it
+            self.logo_photo = None
+        
+        # Display the application name
+        app_name_label = ttkb.Label(
+            content_frame, 
+            text="jocarsa | lightsteelblue", 
+            font=("Helvetica", 16, "bold")
+        )
+        app_name_label.pack(pady=(0, 20))
+        
+        # Add an "Aceptar" button to close the welcome window
+        accept_button = ttkb.Button(
+            content_frame, 
+            text="Aceptar", 
+            command=welcome.destroy,
+            bootstyle=SUCCESS
+        )
+        accept_button.pack()
 
     # -------------------------
     # Load / Save Config
     # -------------------------
     def load_config(self):
-        """
-        Loads the config from a JSON file, or creates it if not found.
-        Returns a dictionary with the hotkeys.
-        """
         default_config = {
             "next_photo": "Right",
             "prev_photo": "Left",
             "save_photo": "z",
             "increase_exposure": "KP_Add",
-            "decrease_exposure": "KP_Subtract"
+            "decrease_exposure": "KP_Subtract",
+            "delete_photo": "q"  # Added default delete shortcut
         }
         if os.path.exists(CONFIG_FILENAME):
             try:
                 with open(CONFIG_FILENAME, 'r', encoding='utf-8') as f:
                     cfg = json.load(f)
-                # Ensure any missing keys from default are populated
                 for k, v in default_config.items():
                     if k not in cfg:
                         cfg[k] = v
@@ -87,15 +171,10 @@ class EnhancedImageBrowser:
                 print(f"Failed to load config.json; using defaults. Error: {e}")
                 return default_config
         else:
-            # Create a new config file with default values
             self.save_config(default_config)
             return default_config
 
     def save_config(self, config_dict=None):
-        """
-        Saves config to config.json. If config_dict is None,
-        saves 'self.config' to disk. Otherwise saves config_dict.
-        """
         if config_dict is None:
             config_dict = self.config
         try:
@@ -105,10 +184,44 @@ class EnhancedImageBrowser:
             print(f"Error saving config.json: {e}")
 
     # -------------------------
+    # Load / Save Settings
+    # -------------------------
+    def load_settings(self):
+        default_settings = {
+            "last_folder": ""
+        }
+        if os.path.exists(SETTINGS_FILENAME):
+            try:
+                with open(SETTINGS_FILENAME, 'r', encoding='utf-8') as f:
+                    settings = json.load(f)
+                for k, v in default_settings.items():
+                    if k not in settings:
+                        settings[k] = v
+                return settings
+            except Exception as e:
+                print(f"Failed to load settings.json; using defaults. Error: {e}")
+                return default_settings
+        else:
+            self.save_settings(default_settings)
+            return default_settings
+
+    def save_settings(self, settings_dict=None):
+        if settings_dict is None:
+            settings_dict = self.settings
+        try:
+            with open(SETTINGS_FILENAME, 'w', encoding='utf-8') as f:
+                json.dump(settings_dict, f, indent=2)
+        except Exception as e:
+            print(f"Error saving settings.json: {e}")
+
+    # -------------------------
     # UI Construction
     # -------------------------
     def create_widgets(self):
-        # -- Header (top) with progress bar
+        # Create Menu
+        self.create_menu()
+
+        # Header (top) with progress bar
         self.header_frame = ttkb.Frame(self.root)
         self.header_frame.pack(side=tk.TOP, fill=tk.X)
 
@@ -124,15 +237,14 @@ class EnhancedImageBrowser:
         )
         self.progress_bar.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
 
-        # -- Main container (3 columns)
+        # Main container (3 columns)
         self.main_frame = ttkb.Frame(self.root)
         self.main_frame.pack(fill=tk.BOTH, expand=True)
 
-        # -- Left column: Treeview for folder images
+        # Left column: Treeview for folder images
         self.left_frame = ttkb.Frame(self.main_frame)
         self.left_frame.pack(side=tk.LEFT, fill=tk.Y, padx=5, pady=5)
 
-        # Configure row height so that 64px-high thumbnails are visible
         style = ttkb.Style()
         style.configure("Treeview", rowheight=72)
 
@@ -143,15 +255,14 @@ class EnhancedImageBrowser:
         self.folder_scroll.pack(side=tk.RIGHT, fill=tk.Y)
         self.folder_tree.configure(yscrollcommand=self.folder_scroll.set)
 
-        # -- Center column: Canvas for image display
+        # Center column: Canvas for image display
         self.center_frame = ttkb.Frame(self.main_frame)
         self.center_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        # We'll use a Canvas to display the image and also to draw a selection rectangle
         self.image_canvas = tk.Canvas(self.center_frame, bg="black", highlightthickness=0)
         self.image_canvas.pack(fill=tk.BOTH, expand=True)
 
-        # -- Right column: Treeview for 'seleccion' folder images
+        # Right column: Treeview for 'seleccion' images
         self.right_frame = ttkb.Frame(self.main_frame)
         self.right_frame.pack(side=tk.LEFT, fill=tk.Y, padx=5, pady=5)
 
@@ -162,117 +273,226 @@ class EnhancedImageBrowser:
         self.seleccion_scroll.pack(side=tk.RIGHT, fill=tk.Y)
         self.seleccion_tree.configure(yscrollcommand=self.seleccion_scroll.set)
 
-        # -- Bottom status bar
+        # Bottom status bar
         self.status_var = tk.StringVar()
         self.status_var.set("Welcome to Enhanced Image Browser!")
         self.status_bar = ttkb.Label(self.root, textvariable=self.status_var, anchor=tk.W, bootstyle="dark")
         self.status_bar.pack(side=tk.BOTTOM, fill=tk.X)
 
-        # -- Toolbar (top) for selecting folder, copying images, etc.
-        self.toolbar_frame = ttkb.Frame(self.root)
-        self.toolbar_frame.pack(side=tk.TOP, fill=tk.X)
-        self.select_folder_button = ttkb.Button(
-            self.toolbar_frame,
-            text="Seleccionar carpeta",
-            command=self.select_folder,
-            bootstyle=INFO
-        )
-        self.select_folder_button.pack(side=tk.LEFT, padx=5)
+        # Remove existing toolbar and footer buttons
+        # These have been removed as per the new menu structure
 
-        self.copy_image_button = ttkb.Button(
-            self.toolbar_frame,
-            text="Copiar imagen",
-            command=self.copy_image,
-            bootstyle=SUCCESS
-        )
-        self.copy_image_button.pack(side=tk.LEFT, padx=5)
+    def create_menu(self):
+        self.menubar = tk.Menu(self.root)
 
-        # Config button
-        self.config_button = ttkb.Button(
-            self.toolbar_frame,
-            text="Config",
-            command=self.open_config_window,
-            bootstyle=SECONDARY
-        )
-        self.config_button.pack(side=tk.LEFT, padx=5)
+        # Archivo Menu
+        archivo_menu = tk.Menu(self.menubar, tearoff=0)
+        archivo_menu.add_command(label="Seleccionar carpeta", command=self.select_folder)
+        archivo_menu.add_separator()
+        archivo_menu.add_command(label="Salir", command=self.root.quit)
+        self.menubar.add_cascade(label="Archivo", menu=archivo_menu)
 
-        # -- Footer toolbar (for rename button)
-        self.footer_toolbar_frame = ttkb.Frame(self.root)
-        self.footer_toolbar_frame.pack(side=tk.BOTTOM, fill=tk.X)
-        self.rename_files_button = ttkb.Button(
-            self.footer_toolbar_frame,
-            text="Renombrar (EXIF)",
-            command=self.rename_all_jpg_by_exif,
-            bootstyle=WARNING
-        )
-        self.rename_files_button.pack(side=tk.LEFT, padx=10)
+        # Editar Menu
+        editar_menu = tk.Menu(self.menubar, tearoff=0)
+        editar_menu.add_command(label="Renombrar archivos (EXIF)", command=self.rename_all_jpg_by_exif)
+        self.menubar.add_cascade(label="Editar", menu=editar_menu)
 
+        # Efectos Menu
+        efectos_menu = tk.Menu(self.menubar, tearoff=0)
+        efectos_menu.add_command(label="Reducción de ruido", command=self.open_denoise_window)
+        # Future effects can be added here
+        self.menubar.add_cascade(label="Efectos", menu=efectos_menu)
+
+        # Ayuda Menu
+        ayuda_menu = tk.Menu(self.menubar, tearoff=0)
+        ayuda_menu.add_command(label="Información", command=self.show_info)
+        ayuda_menu.add_command(label="Configuración", command=self.open_config_window)
+        self.menubar.add_cascade(label="Ayuda", menu=ayuda_menu)
+
+        self.root.config(menu=self.menubar)
+
+    # -------------------------
+    # Floating Denoise Window
+    # -------------------------
+    def open_denoise_window(self):
+        denoise_window = ttkb.Toplevel(self.root)
+        denoise_window.title("Reducción de ruido")
+        denoise_window.geometry("400x300")
+        denoise_window.grab_set()
+        denoise_window.attributes("-topmost", True)
+
+        ttkb.Label(denoise_window, text="Parámetros de reducción de ruido", font=("Helvetica", 12)).pack(pady=10)
+
+        # Radius
+        radius_frame = ttkb.Frame(denoise_window)
+        radius_frame.pack(pady=5, padx=10, fill=tk.X)
+        ttkb.Label(radius_frame, text="Radio:").pack(side=tk.LEFT, padx=5)
+        radius_var = tk.IntVar(value=self.denoise_radius_var.get())
+        radius_entry = ttkb.Spinbox(radius_frame, from_=0, to=10, textvariable=radius_var)
+        radius_entry.pack(side=tk.LEFT, padx=5)
+
+        # Tolerance
+        tol_frame = ttkb.Frame(denoise_window)
+        tol_frame.pack(pady=5, padx=10, fill=tk.X)
+        ttkb.Label(tol_frame, text="Tolerancia:").pack(side=tk.LEFT, padx=5)
+        tol_var = tk.IntVar(value=self.denoise_tol_var.get())
+        tol_entry = ttkb.Spinbox(tol_frame, from_=0, to=100, textvariable=tol_var)
+        tol_entry.pack(side=tk.LEFT, padx=5)
+
+        # Mix
+        mix_frame = ttkb.Frame(denoise_window)
+        mix_frame.pack(pady=5, padx=10, fill=tk.X)
+        ttkb.Label(mix_frame, text="Mezcla:").pack(side=tk.LEFT, padx=5)
+        mix_var = tk.DoubleVar(value=self.denoise_mix_var.get())
+        mix_entry = ttkb.Spinbox(mix_frame, from_=0.0, to=1.0, increment=0.1, textvariable=mix_var)
+        mix_entry.pack(side=tk.LEFT, padx=5)
+
+        # Buttons: Preview and Apply & Close
+        button_frame = ttkb.Frame(denoise_window)
+        button_frame.pack(pady=20)
+
+        preview_button = ttkb.Button(button_frame, text="Previsualizar", command=lambda: self.preview_denoise(
+            radius_var.get(),
+            tol_var.get(),
+            mix_var.get()
+        ), bootstyle=INFO)
+        preview_button.pack(side=tk.LEFT, padx=10)
+
+        apply_button = ttkb.Button(button_frame, text="Aplicar y Cerrar", command=lambda: self.apply_denoise_and_close(
+            radius_var.get(),
+            tol_var.get(),
+            mix_var.get(),
+            denoise_window
+        ), bootstyle=SUCCESS)
+        apply_button.pack(side=tk.LEFT, padx=10)
+
+    def preview_denoise(self, radius, tolerance, mix):
+        if not self.original_image_pil:
+            messagebox.showwarning("Advertencia", "No hay imagen cargada para previsualizar.")
+            return
+
+        def denoise_thread():
+            try:
+                # Apply denoise without modifying the original image
+                pil_img = self.apply_exposure(self.original_image_pil, self.exposure_factor)
+                denoised_img = denoise.denoise_image(
+                    pil_img,
+                    radius=radius,
+                    tolerance=tolerance,
+                    mix=mix
+                )
+                # Schedule the UI update in the main thread
+                self.root.after(0, lambda: self.update_image_on_canvas(denoised_img))
+                self.update_status("Previsualización de reducción de ruido aplicada.")
+            except Exception as e:
+                self.update_status(f"Error en previsualización de denoising: {e}")
+                self.root.after(0, lambda: messagebox.showerror("Error", f"No se pudo previsualizar la reducción de ruido.\n{e}"))
+
+        threading.Thread(target=denoise_thread, daemon=True).start()
+
+    def apply_denoise_and_close(self, radius, tolerance, mix, window):
+        if not self.original_image_pil:
+            messagebox.showwarning("Advertencia", "No hay imagen cargada para aplicar.")
+            return
+
+        def denoise_thread():
+            try:
+                # Apply denoise and update the original image
+                pil_img = self.apply_exposure(self.original_image_pil, self.exposure_factor)
+                denoised_img = denoise.denoise_image(
+                    pil_img,
+                    radius=radius,
+                    tolerance=tolerance,
+                    mix=mix
+                )
+                self.original_image_pil = denoised_img
+                # Schedule the UI update in the main thread
+                self.root.after(0, lambda: self.update_image_on_canvas(denoised_img))
+                self.update_status("Reducción de ruido aplicada.")
+            except Exception as e:
+                self.update_status(f"Error al aplicar denoising: {e}")
+                self.root.after(0, lambda: messagebox.showerror("Error", f"No se pudo aplicar la reducción de ruido.\n{e}"))
+
+        threading.Thread(target=denoise_thread, daemon=True).start()
+        window.destroy()
+
+    # -------------------------
+    # Info Window
+    # -------------------------
+    def show_info(self):
+        info = "Enhanced Image Browser\nVersión 1.0\nDesarrollado por Jocarsa."
+        messagebox.showinfo("Información", info)
+
+    # -------------------------
+    # Setup Layout
+    # -------------------------
     def setup_layout(self):
-        """ Additional geometry or layout configurations if needed """
-        self.root.geometry("1200x700")  # Initial window size
+        self.root.geometry("1200x700")
 
     def bind_events(self):
-        """ Bind keyboard and mouse events based on config. """
-        # We use the config keys for next/prev/save/increase/decrease
-        # but we also need to handle other keys (like ignoring unrecognized).
+        """ Bind keyboard and mouse events. """
         self.update_bindings()
-
-        # Capture all other key presses to avoid freezing on unrecognized keys
-        self.root.bind("<Key>", self.on_any_key, add="+")  # add="+" so we don't remove other bindings
-
-        # Mouse events for selection rectangle on the canvas
+        self.root.bind("<Key>", self.on_any_key, add="+")
+        # Mouse events on canvas
         self.image_canvas.bind("<ButtonPress-1>", self.on_left_button_press)
         self.image_canvas.bind("<B1-Motion>", self.on_mouse_move)
         self.image_canvas.bind("<ButtonRelease-1>", self.on_left_button_release)
 
-        # Treeview selection events
+        # Middle-mouse or right-click for panning
+        self.image_canvas.bind("<ButtonPress-2>", self.on_pan_start)
+        self.image_canvas.bind("<B2-Motion>", self.on_pan_move)
+        self.image_canvas.bind("<ButtonRelease-2>", self.on_pan_end)
+
+        self.image_canvas.bind("<ButtonPress-3>", self.on_pan_start)
+        self.image_canvas.bind("<B3-Motion>", self.on_pan_move)
+        self.image_canvas.bind("<ButtonRelease-3>", self.on_pan_end)
+
+        # Mouse wheel zoom
+        self.image_canvas.bind("<MouseWheel>", self.on_mouse_wheel)            # Windows
+        self.image_canvas.bind("<Button-4>", self.on_mouse_wheel_linux)        # Linux scroll up
+        self.image_canvas.bind("<Button-5>", self.on_mouse_wheel_linux)        # Linux scroll down
+
+        # Treeview selection
         self.folder_tree.bind("<<TreeviewSelect>>", self.on_tree_select)
         self.seleccion_tree.bind("<<TreeviewSelect>>", self.on_tree_select_seleccion)
 
-        # Handle window resize to update displayed image
+        # Handle window resize
         self.center_frame.bind("<Configure>", self.on_center_frame_resize)
 
     def update_bindings(self):
-        """ Unbind old keys, bind new ones according to self.config. """
-        # Unbind everything that might have been previously bound:
+        """Update/unbind old keys and rebind with config values."""
+        # Unbind known keys
         for key in ["<Left>", "<Right>", "<Up>", "<Down>",
-                    "<KP_Add>", "<KP_Subtract>", "<z>",
-                    # Also unbind any current config keys
+                    "<KP_Add>", "<KP_Subtract>", "<z>", "<q>",
                     f"<{self.config['next_photo']}>",
                     f"<{self.config['prev_photo']}>",
                     f"<{self.config['save_photo']}>",
                     f"<{self.config['increase_exposure']}>",
-                    f"<{self.config['decrease_exposure']}>"]:
+                    f"<{self.config['decrease_exposure']}>",
+                    f"<{self.config['delete_photo']}>"]:
             try:
                 self.root.unbind(key)
             except:
                 pass
 
-        # Now bind the newly configured hotkeys
+        # Bind from config
         self.root.bind(f"<{self.config['prev_photo']}>", self.show_previous_image)
         self.root.bind(f"<{self.config['next_photo']}>", self.show_next_image)
         self.root.bind(f"<{self.config['save_photo']}>", self.copy_image)
         self.root.bind(f"<{self.config['increase_exposure']}>", self.increase_exposure)
         self.root.bind(f"<{self.config['decrease_exposure']}>", self.decrease_exposure)
+        self.root.bind(f"<{self.config['delete_photo']}>", self.delete_image)
 
     # -------------------------
-    # Config Window (Modal)
+    # Config Window
     # -------------------------
     def open_config_window(self):
-        """
-        Opens a modal (Toplevel) window that allows the user
-        to change hotkeys for next/prev/save/increase/decrease.
-        """
         config_window = ttkb.Toplevel(self.root)
         config_window.title("Configurar Hotkeys")
         config_window.resizable(False, False)
-
-        # Make it modal
         config_window.grab_set()
 
-        # Current keys from self.config
         row = 0
-        # Labels & entry fields
         ttkb.Label(config_window, text="Previous Photo key:").grid(row=row, column=0, padx=5, pady=5, sticky=tk.E)
         prev_var = tk.StringVar(value=self.config["prev_photo"])
         prev_entry = ttkb.Entry(config_window, textvariable=prev_var)
@@ -302,16 +522,20 @@ class EnhancedImageBrowser:
         dec_entry = ttkb.Entry(config_window, textvariable=dec_var)
         dec_entry.grid(row=row, column=1, padx=5, pady=5)
 
-        # Save/Cancel buttons
+        row += 1
+        ttkb.Label(config_window, text="Delete Photo key:").grid(row=row, column=0, padx=5, pady=5, sticky=tk.E)
+        delete_var = tk.StringVar(value=self.config.get("delete_photo", "q"))
+        delete_entry = ttkb.Entry(config_window, textvariable=delete_var)
+        delete_entry.grid(row=row, column=1, padx=5, pady=5)
+
         def save_changes():
-            """Save the changes to config, update bindings, close window."""
             self.config["prev_photo"] = prev_var.get() or "Left"
             self.config["next_photo"] = next_var.get() or "Right"
             self.config["save_photo"] = save_var.get() or "z"
             self.config["increase_exposure"] = inc_var.get() or "KP_Add"
             self.config["decrease_exposure"] = dec_var.get() or "KP_Subtract"
-
-            self.save_config()  # updates config.json
+            self.config["delete_photo"] = delete_var.get() or "q"
+            self.save_config()
             self.update_bindings()
             config_window.destroy()
 
@@ -325,28 +549,29 @@ class EnhancedImageBrowser:
         ttkb.Button(button_frame, text="Cancel", command=cancel, bootstyle=DANGER).pack(side=tk.LEFT, padx=5)
 
     # -------------------------
-    # Generic Key Event Handler
+    # Key Event Handler
     # -------------------------
     def on_any_key(self, event):
-        """
-        Prevents the program from hanging if the user presses
-        a key that does not have a specific binding.
-        """
         recognized_keys = {
             self.config["prev_photo"],
             self.config["next_photo"],
             self.config["save_photo"],
             self.config["increase_exposure"],
-            self.config["decrease_exposure"]
+            self.config["decrease_exposure"],
+            self.config["delete_photo"]
         }
         if event.keysym not in recognized_keys:
             self.update_status(f"Ignored unrecognized key: {event.keysym}")
 
     # -------------------------
-    # Folder and File Operations
+    # Folder / File Ops
     # -------------------------
     def select_folder(self):
-        folder_selected = filedialog.askdirectory()
+        initial_dir = self.settings.get("last_folder", "")
+        if not initial_dir or not os.path.isdir(initial_dir):
+            initial_dir = os.path.expanduser("~")  # Default to home directory
+
+        folder_selected = filedialog.askdirectory(initialdir=initial_dir)
         if folder_selected:
             self.folder_path = folder_selected
             self.seleccion_folder = os.path.join(self.folder_path, "seleccion")
@@ -355,48 +580,43 @@ class EnhancedImageBrowser:
             self.populate_folder_tree()
             self.populate_seleccion_tree()
 
-            # Start threads to generate thumbnails in background
+            # Update settings.json with the last folder
+            self.settings["last_folder"] = self.folder_path
+            self.save_settings()
+
+            # Generate thumbnails in background, but assign them in main thread
             self.start_thumbnail_generation(
                 folder_path=self.folder_path,
                 image_list=self.image_list,
                 thumb_dict=self.thumb_images_left,
-                tree=self.folder_tree,
-                subfolder_name="miniaturas"
+                tree=self.folder_tree
             )
             self.start_thumbnail_generation(
                 folder_path=self.seleccion_folder,
                 image_list=self.seleccion_list,
                 thumb_dict=self.thumb_images_right,
-                tree=self.seleccion_tree,
-                subfolder_name="miniaturas"
+                tree=self.seleccion_tree
             )
 
             if self.image_list:
                 self.current_index = 0
-                self.display_image(self.current_index)
+                self.display_image(self.current_index, fit=True)
                 self.update_status(f"Loaded {len(self.image_list)} images from '{self.folder_path}'.")
             else:
                 self.update_status("No JPG images found in the selected folder.")
                 messagebox.showinfo("No Images", "No JPG images found in the selected folder.")
 
     def load_images(self):
-        """ Load JPG/JPEG files from the selected folder """
         supported_extensions = ('.jpg', '.jpeg', '.JPG', '.JPEG')
         self.image_list = [f for f in os.listdir(self.folder_path) if f.lower().endswith(supported_extensions)]
         self.image_list.sort()
 
     def populate_folder_tree(self):
-        """ Populate the left treeview with the image_list """
         self.folder_tree.delete(*self.folder_tree.get_children())
         for idx, fname in enumerate(self.image_list):
             self.folder_tree.insert("", "end", iid=str(idx), text=fname)
 
     def populate_seleccion_tree(self):
-        """
-        Populate the right treeview with files in the seleccion folder.
-        We also assign iid=str(idx) so we can directly match items
-        in generate_thumbnails via `if str(idx) in tree.get_children():`
-        """
         self.seleccion_tree.delete(*self.seleccion_tree.get_children())
         supported_extensions = ('.jpg', '.jpeg', '.JPG', '.JPEG')
         if os.path.exists(self.seleccion_folder):
@@ -405,192 +625,178 @@ class EnhancedImageBrowser:
             )
         else:
             self.seleccion_list = []
-
         for idx, fname in enumerate(self.seleccion_list):
             self.seleccion_tree.insert("", "end", iid=str(idx), text=fname)
 
     def on_tree_select(self, event):
-        """
-        Called when the user selects a file in the left treeview.
-        We must ensure not to re-display the same index to avoid infinite loops.
-        """
         item_id = self.folder_tree.focus()
         if item_id.isdigit():
             selected_index = int(item_id)
-            # Only display if it's a different index
             if selected_index != self.current_index:
                 self.current_index = selected_index
-                self.display_image(self.current_index)
+                self.display_image(self.current_index, fit=True)
 
     def on_tree_select_seleccion(self, event):
-        """ Handle selection in the 'seleccion' treeview on the right (optional) """
         item_id = self.seleccion_tree.focus()
         if item_id:
             fname = self.seleccion_tree.item(item_id, "text")
             self.update_status(f"'seleccion' folder item selected: {fname}")
 
     # -------------------------
-    # Thumbnails Generation (Background Thread)
+    # Thumbnails Generation
     # -------------------------
     def start_thumbnail_generation(self, folder_path, image_list, thumb_dict, tree, subfolder_name="miniaturas"):
-        """
-        Starts a background thread to generate thumbnails in a subfolder of `folder_path`.
-        Once a thumbnail is created, updates the TreeView item with the image.
-        """
+        """Spawn a thread that will generate the thumbnail files, then schedule
+        an update in the main thread to create PhotoImage and assign it."""
         thread = threading.Thread(
-            target=self.generate_thumbnails,
+            target=self.generate_thumbnails_in_background,
             args=(folder_path, image_list, thumb_dict, tree, subfolder_name),
             daemon=True
         )
         thread.start()
 
-    def generate_thumbnails(self, folder_path, image_list, thumb_dict, tree, subfolder_name):
-        """
-        Generates thumbnail images in `folder_path/subfolder_name`.
-        Then updates the TreeView items with the thumbnail images.
-        """
+    def generate_thumbnails_in_background(self, folder_path, image_list, thumb_dict, tree, subfolder_name):
         if not folder_path:
             return
-
         thumbs_folder = os.path.join(folder_path, subfolder_name)
         os.makedirs(thumbs_folder, exist_ok=True)
 
-        for idx, filename in enumerate(image_list):
+        # We'll store results (filename -> thumb_path) so we can update in main thread
+        result_list = []
+        for filename in image_list:
             source_path = os.path.join(folder_path, filename)
-            # Build destination path
             base, ext = os.path.splitext(filename)
             thumb_filename = base + "_thumb.jpg"
             thumb_path = os.path.join(thumbs_folder, thumb_filename)
 
-            # If thumbnail does not exist, generate it
             if not os.path.exists(thumb_path):
                 try:
                     with Image.open(source_path) as img:
                         img = ImageOps.exif_transpose(img)
-                        img.thumbnail((64, 64))  # small thumbnail
+                        img.thumbnail((64, 64))
                         img.save(thumb_path, format="JPEG", quality=70)
                 except Exception as e:
                     print(f"Could not generate thumbnail for {source_path}: {e}")
                     continue
 
-            # Now load the thumbnail into memory and update the dict
-            try:
-                with Image.open(thumb_path) as thumb_img:
-                    tk_thumb = ImageTk.PhotoImage(thumb_img)
-                    thumb_dict[filename] = tk_thumb
+            result_list.append((filename, thumb_path))
 
-                # Attempt to update by iid=str(idx) first
-                if str(idx) in tree.get_children():
-                    tree.item(str(idx), image=tk_thumb)
-                else:
-                    # fallback: match by the 'text' if we can't find a matching iid
+        # Now schedule the creation of PhotoImage objects in the main thread
+        def update_thumbs():
+            for filename, thumb_path in result_list:
+                try:
+                    with Image.open(thumb_path) as thumb_img:
+                        tk_thumb = ImageTk.PhotoImage(thumb_img)
+                        thumb_dict[filename] = tk_thumb
+                    # Try to find the item in the tree
                     for item_id in tree.get_children():
-                        if tree.item(item_id, "text") == filename:
+                        item_text = tree.item(item_id, "text")
+                        if item_text == filename:
                             tree.item(item_id, image=tk_thumb)
                             break
-            except Exception as e:
-                print(f"Could not load thumbnail image: {thumb_path} => {e}")
+                except Exception as e:
+                    print(f"Could not load thumbnail image: {thumb_path} => {e}")
+
+        self.root.after(50, update_thumbs)
 
     # -------------------------
-    # Image Display & Resizing
+    # Image Display
     # -------------------------
-    def display_image(self, index):
-        """ Load and display the image at the given index """
+    def display_image(self, index, fit=False):
         if not self.image_list:
             return
 
-        # Reset exposure factor for each new image
-        self.exposure_factor = 1.0
-
         image_path = os.path.join(self.folder_path, self.image_list[index])
         try:
-            # Open the image (store original)
             pil_img = Image.open(image_path)
             pil_img = self.apply_exif_orientation(pil_img)
             self.original_image_pil = pil_img
-
-            # Apply current exposure (which is back to 1.0 for every new image)
-            pil_img = self.apply_exposure(pil_img, self.exposure_factor)
-
-            # Resize to fit the center frame's current size
-            self.update_image_on_canvas(pil_img)
-
-            # Update the window title and status
+            if fit:
+                self.auto_fit = True
+                self.fit_image_to_canvas()
+            else:
+                self.redisplay_with_exposure()
             self.root.title(f"jocarsa | lightsteelblue - {self.image_list[self.current_index]}")
             self.update_status(f"Mostrando '{self.image_list[self.current_index]}'.")
             self.highlight_current_tree_item()
-
-            # Update the progress bar to reflect current position (0% -> first, 100% -> last)
             self.update_progress_bar()
         except Exception as e:
             self.update_status(f"Failed to load image: {self.image_list[self.current_index]}")
             messagebox.showerror("Error", f"Failed to load image.\n{e}")
 
     def apply_exif_orientation(self, image):
-        """ Adjust image orientation based on EXIF data """
         try:
             image = ImageOps.exif_transpose(image)
         except Exception as e:
             self.update_status(f"Could not apply EXIF orientation: {e}")
         return image
 
-    def apply_exposure(self, pil_img, factor):
-        """
-        Adjust brightness (exposure) of the image with a given factor.
-        factor = 1.0 means no change, >1.0 brightens, <1.0 darkens.
-        """
-        if np is not None:
-            # Example using NumPy.
-            arr = np.array(pil_img, dtype=np.float32)
-            arr *= factor
-            arr = np.clip(arr, 0, 255).astype(np.uint8)
-            return Image.fromarray(arr)
-        else:
-            # Fallback to PIL's ImageEnhance
-            enhancer = ImageEnhance.Brightness(pil_img)
-            return enhancer.enhance(factor)
-
     def update_image_on_canvas(self, pil_img):
-        """ Resize the image to fit the center frame, display on the canvas """
+        """Scale the PIL image according to zoom_scale, then display with pan offsets."""
         if not pil_img:
             return
-
-        canvas_width = self.image_canvas.winfo_width()
-        canvas_height = self.image_canvas.winfo_height()
-
-        if canvas_width < 10 or canvas_height < 10:
-            # Canvas not yet properly sized
+        cw = self.image_canvas.winfo_width()
+        ch = self.image_canvas.winfo_height()
+        if cw < 10 or ch < 10:
             return
 
-        display_img = pil_img.copy()
-        display_img.thumbnail((canvas_width, canvas_height), self.get_resample_filter())
+        # Compute scaled size
+        w, h = pil_img.size
+        scaled_w = int(w * self.zoom_scale)
+        scaled_h = int(h * self.zoom_scale)
+        display_img = pil_img.resize((scaled_w, scaled_h), self.get_resample_filter())
+
         self.display_image_tk = ImageTk.PhotoImage(display_img)
 
-        # Clear the canvas and redraw
         self.image_canvas.delete("all")
+        # Calculate center position
+        center_x = cw / 2 + self.pan_offset_x
+        center_y = ch / 2 + self.pan_offset_y
         self.image_canvas.create_image(
-            canvas_width // 2,
-            canvas_height // 2,
+            center_x,
+            center_y,
             image=self.display_image_tk,
             anchor=tk.CENTER
         )
-        # Reset selection rectangle
-        self.selection_coords = None
-        self.canvas_rect_id = None
+
+        # Redraw selection rectangle if we had one
+        self.redraw_selection()
 
     def get_resample_filter(self):
-        # For Pillow >=10.0.0
         try:
             return Image.Resampling.LANCZOS
         except AttributeError:
-            # For older Pillow versions
             return Image.ANTIALIAS
 
     def on_center_frame_resize(self, event):
-        """ Called whenever the center frame or canvas is resized. Redraw the current image. """
-        if self.original_image_pil:
-            pil_img = self.apply_exposure(self.original_image_pil, self.exposure_factor)
-            self.update_image_on_canvas(pil_img)
+        # Redisplay with current exposure/denoise/zoom/pan
+        if self.auto_fit:
+            self.fit_image_to_canvas()
+        else:
+            self.update_image_on_canvas(self.original_image_pil)
+
+    def fit_image_to_canvas(self):
+        """Fit the image to the canvas while maintaining aspect ratio."""
+        if not self.original_image_pil:
+            return
+
+        cw = self.image_canvas.winfo_width()
+        ch = self.image_canvas.winfo_height()
+        if cw < 10 or ch < 10:
+            return
+
+        pil_img = self.apply_exposure(self.original_image_pil, self.exposure_factor)
+
+        # Calculate scale to fit
+        img_w, img_h = pil_img.size
+        scale_w = cw / img_w
+        scale_h = ch / img_h
+        self.zoom_scale = min(scale_w, scale_h, 1.0)  # Don't upscale beyond original size
+
+        self.pan_offset_x = 0
+        self.pan_offset_y = 0
+
+        self.update_image_on_canvas(pil_img)
 
     # -------------------------
     # Navigation
@@ -598,18 +804,14 @@ class EnhancedImageBrowser:
     def show_previous_image(self, event=None):
         if self.image_list:
             self.current_index = (self.current_index - 1) % len(self.image_list)
-            self.display_image(self.current_index)
+            self.display_image(self.current_index, fit=True)
 
     def show_next_image(self, event=None):
         if self.image_list:
             self.current_index = (self.current_index + 1) % len(self.image_list)
-            self.display_image(self.current_index)
+            self.display_image(self.current_index, fit=True)
 
     def highlight_current_tree_item(self):
-        """
-        Highlight the current image in the left treeview without
-        re-triggering the same selection.
-        """
         for item_id in self.folder_tree.get_children():
             self.folder_tree.selection_remove(item_id)
         if str(self.current_index) not in self.folder_tree.selection():
@@ -625,7 +827,8 @@ class EnhancedImageBrowser:
             if self.exposure_factor > 5.0:
                 self.exposure_factor = 5.0
             self.update_status(f"Exposure increased to {self.exposure_factor:.2f}")
-            self.redisplay_with_exposure()
+            self.auto_fit = False  # User is manually adjusting
+            self.update_image_on_canvas(self.original_image_pil)
 
     def decrease_exposure(self, event=None):
         if self.original_image_pil:
@@ -633,64 +836,136 @@ class EnhancedImageBrowser:
             if self.exposure_factor < 0.1:
                 self.exposure_factor = 0.1
             self.update_status(f"Exposure decreased to {self.exposure_factor:.2f}")
-            self.redisplay_with_exposure()
+            self.auto_fit = False  # User is manually adjusting
+            self.update_image_on_canvas(self.original_image_pil)
 
     def redisplay_with_exposure(self):
-        """ Re-apply exposure to the original PIL image and update the canvas """
-        if self.original_image_pil:
-            pil_img = self.apply_exposure(self.original_image_pil, self.exposure_factor)
+        """Apply exposure and optional denoising, then show."""
+        if not self.original_image_pil:
+            return
+        pil_img = self.apply_exposure(self.original_image_pil, self.exposure_factor)
+        if self.enable_denoise_var.get():
+            # Apply denoise in a separate thread to avoid freezing the UI
+            threading.Thread(
+                target=self.apply_denoise_effect,
+                args=(pil_img,),
+                daemon=True
+            ).start()
+        else:
             self.update_image_on_canvas(pil_img)
+
+    def apply_exposure(self, pil_img, factor):
+        if np is not None:
+            arr = np.array(pil_img, dtype=np.float32)
+            arr *= factor
+            arr = np.clip(arr, 0, 255).astype(np.uint8)
+            return Image.fromarray(arr)
+        else:
+            enhancer = ImageEnhance.Brightness(pil_img)
+            return enhancer.enhance(factor)
+
+    def apply_denoise_effect(self, pil_img):
+        try:
+            denoised_img = denoise.denoise_image(
+                pil_img,
+                radius=self.denoise_radius_var.get(),
+                tolerance=self.denoise_tol_var.get(),
+                mix=self.denoise_mix_var.get()
+            )
+            self.update_image_on_canvas(denoised_img)
+            self.update_status("Reducción de ruido aplicada.")
+        except Exception as e:
+            self.update_status(f"Denoising Error: {e}")
+            messagebox.showerror("Error", f"Failed to apply denoising.\n{e}")
 
     # -------------------------
     # Selection Rectangle
     # -------------------------
     def on_left_button_press(self, event):
-        """ Capture the starting point for the selection rectangle """
+        # Start drawing rectangle
         self.start_x = self.image_canvas.canvasx(event.x)
         self.start_y = self.image_canvas.canvasy(event.y)
         self.selection_coords = (self.start_x, self.start_y, self.start_x, self.start_y)
 
     def on_mouse_move(self, event):
-        """ Update the selection rectangle as the mouse moves """
-        if not self.selection_coords:
-            return
-        end_x = self.image_canvas.canvasx(event.x)
-        end_y = self.image_canvas.canvasy(event.y)
-
-        self.selection_coords = (self.start_x, self.start_y, end_x, end_y)
-
-        if self.canvas_rect_id:
-            self.image_canvas.delete(self.canvas_rect_id)
-        self.canvas_rect_id = self.image_canvas.create_rectangle(
-            self.start_x, self.start_y, end_x, end_y,
-            outline="yellow", width=2
-        )
+        # Update selection rectangle if left mouse is pressed
+        if event.state & 0x0100:  # left button bit
+            end_x = self.image_canvas.canvasx(event.x)
+            end_y = self.image_canvas.canvasy(event.y)
+            self.selection_coords = (self.start_x, self.start_y, end_x, end_y)
+            self.redraw_selection()
 
     def on_left_button_release(self, event):
-        """ Finalize the selection rectangle """
-        if not self.selection_coords:
-            return
-        end_x = self.image_canvas.canvasx(event.x)
-        end_y = self.image_canvas.canvasy(event.y)
-        self.selection_coords = (self.start_x, self.start_y, end_x, end_y)
+        # Finalize selection
+        if self.selection_coords:
+            end_x = self.image_canvas.canvasx(event.x)
+            end_y = self.image_canvas.canvasy(event.y)
+            self.selection_coords = (self.start_x, self.start_y, end_x, end_y)
+
+    def redraw_selection(self):
+        self.image_canvas.delete("selection_rect")
+        if self.selection_coords:
+            x1, y1, x2, y2 = self.selection_coords
+            self.image_canvas.create_rectangle(
+                x1, y1, x2, y2,
+                outline="yellow", width=2,
+                tag="selection_rect"
+            )
+
+    # -------------------------
+    # Panning & Zoom
+    # -------------------------
+    def on_pan_start(self, event):
+        self.dragging = True
+        self.last_mouse_x = event.x
+        self.last_mouse_y = event.y
+
+    def on_pan_move(self, event):
+        if self.dragging:
+            dx = event.x - self.last_mouse_x
+            dy = event.y - self.last_mouse_y
+            self.last_mouse_x = event.x
+            self.last_mouse_y = event.y
+            # Move offsets
+            self.pan_offset_x += dx
+            self.pan_offset_y += dy
+            self.update_image_on_canvas(self.original_image_pil)
+
+    def on_pan_end(self, event):
+        self.dragging = False
+
+    def on_mouse_wheel(self, event):
+        """Zoom on Windows (event.delta is usually 120 or -120)"""
+        if event.delta > 0:
+            self.zoom_scale *= 1.1
+        else:
+            self.zoom_scale /= 1.1
+        if self.zoom_scale < 0.1:
+            self.zoom_scale = 0.1
+        self.auto_fit = False  # User is manually zooming
+        self.update_image_on_canvas(self.original_image_pil)
+
+    def on_mouse_wheel_linux(self, event):
+        """Zoom on Linux: Button-4 => up, Button-5 => down"""
+        if event.num == 4:
+            self.zoom_scale *= 1.1
+        elif event.num == 5:
+            self.zoom_scale /= 1.1
+        if self.zoom_scale < 0.1:
+            self.zoom_scale = 0.1
+        self.auto_fit = False  # User is manually zooming
+        self.update_image_on_canvas(self.original_image_pil)
 
     # -------------------------
     # Copy / Save Image
     # -------------------------
     def copy_image(self, event=None):
-        """
-        If no selection rectangle is defined (or it's effectively zero-area),
-        copy the full image with the current exposure factor.
-        Otherwise, crop to the selection rectangle and save that portion.
-        """
         if not self.image_list:
             self.update_status("No image to copy.")
             return
 
         source_image = os.path.join(self.folder_path, self.image_list[self.current_index])
         os.makedirs(self.seleccion_folder, exist_ok=True)
-
-        # Extract EXIF datetime to build destination filename
         new_filename = self.build_destination_filename(source_image)
         destination_image = os.path.join(self.seleccion_folder, new_filename)
 
@@ -700,34 +975,38 @@ class EnhancedImageBrowser:
             destination_image = os.path.join(self.seleccion_folder, f"{base}_{counter}{ext}")
             counter += 1
 
-        # Load the full original image, apply orientation, apply exposure
         try:
             full_img = Image.open(source_image)
             full_img = self.apply_exif_orientation(full_img)
             full_img = self.apply_exposure(full_img, self.exposure_factor)
+            # Crop if selection
+            final_img = self.maybe_crop(full_img)
 
-            # Check if there's a selection
-            cropped_img = self.maybe_crop(full_img)
-            # Save final
-            cropped_img.save(destination_image, quality=95)
+            # If denoise is enabled, apply it
+            if self.enable_denoise_var.get():
+                final_img = denoise.denoise_image(
+                    final_img,
+                    radius=self.denoise_radius_var.get(),
+                    tolerance=self.denoise_tol_var.get(),
+                    mix=self.denoise_mix_var.get()
+                )
+
+            final_img.save(destination_image, quality=95)
             self.update_status(f"Image copied to '{destination_image}'.")
             self.populate_seleccion_tree()
 
-            # Also generate a thumbnail in seleccion's miniaturas folder (in background)
+            # Generate a thumbnail (in background, main thread will attach to Treeview)
             self.start_thumbnail_generation(
                 folder_path=self.seleccion_folder,
                 image_list=[os.path.basename(destination_image)],
                 thumb_dict=self.thumb_images_right,
-                tree=self.seleccion_tree,
-                subfolder_name="miniaturas"
+                tree=self.seleccion_tree
             )
-
         except Exception as e:
             self.update_status(f"Copy Error: {e}")
             messagebox.showerror("Copy Error", f"Failed to copy image.\n{e}")
 
     def build_destination_filename(self, source_image):
-        """ Build a new filename based on EXIF date if available, else use original name """
         try:
             with open(source_image, 'rb') as img_file:
                 tags = exifread.process_file(img_file, stop_tag="EXIF DateTimeOriginal", details=False)
@@ -741,60 +1020,58 @@ class EnhancedImageBrowser:
         return self.image_list[self.current_index]
 
     def maybe_crop(self, full_img):
-        """
-        If the user made a selection rectangle, crop to that rectangle.
-        Otherwise, return the full image.
-        We need to map the selection rectangle from the *canvas coords* back to the
-        original image coords.
-        """
+        """Crop the full_img according to selection rectangle, if any."""
         if not self.selection_coords:
-            return full_img  # No selection made
-
-        x1, y1, x2, y2 = self.selection_coords
-        canvas_width = self.image_canvas.winfo_width()
-        canvas_height = self.image_canvas.winfo_height()
-        orig_width, orig_height = full_img.size
-
-        # Determine scale factor used to fit the image into the canvas
-        display_ratio = min(canvas_width / orig_width, canvas_height / orig_height)
-
-        # The displayed image is center-aligned in the canvas
-        new_disp_width = int(orig_width * display_ratio)
-        new_disp_height = int(orig_height * display_ratio)
-        offset_x = (canvas_width - new_disp_width) // 2
-        offset_y = (canvas_height - new_disp_height) // 2
-
-        sel_x1 = (x1 - offset_x) / display_ratio
-        sel_y1 = (y1 - offset_y) / display_ratio
-        sel_x2 = (x2 - offset_x) / display_ratio
-        sel_y2 = (y2 - offset_y) / display_ratio
-
-        left = min(sel_x1, sel_x2)
-        right = max(sel_x1, sel_x2)
-        top = min(sel_y1, sel_y2)
-        bottom = max(sel_y1, sel_y2)
-
-        # If selection is too small, return full image
-        if (right - left) < 2 or (bottom - top) < 2:
             return full_img
 
-        # Clip to the image boundaries
-        left = max(0, left)
-        top = max(0, top)
-        right = min(orig_width, right)
-        bottom = min(orig_height, bottom)
+        x1, y1, x2, y2 = self.selection_coords
 
-        return full_img.crop((left, top, right, bottom))
+        # Since we are panning/zooming, we need to account for that
+        # We'll invert the transform from canvas coords -> image coords
+        # scaled image size
+        orig_w, orig_h = full_img.size
+        scaled_w = int(orig_w * self.zoom_scale)
+        scaled_h = int(orig_h * self.zoom_scale)
+
+        # The image center is at (pan_offset_x, pan_offset_y) in canvas coords
+        # So the image top-left is (pan_offset_x - scaled_w/2, pan_offset_y - scaled_h/2).
+        left_in_canvas = self.pan_offset_x - scaled_w / 2
+        top_in_canvas = self.pan_offset_y - scaled_h / 2
+
+        # The selection coords are in canvas space
+        # so (x1 - left_in_canvas) / self.zoom_scale gives us the original image x
+        sel_left = (x1 - left_in_canvas) / self.zoom_scale
+        sel_top = (y1 - top_in_canvas) / self.zoom_scale
+        sel_right = (x2 - left_in_canvas) / self.zoom_scale
+        sel_bottom = (y2 - top_in_canvas) / self.zoom_scale
+
+        # Clamp
+        sel_left = max(0, min(sel_left, orig_w))
+        sel_right = max(0, min(sel_right, orig_w))
+        sel_top = max(0, min(sel_top, orig_h))
+        sel_bottom = max(0, min(sel_bottom, orig_h))
+
+        if (sel_right - sel_left) < 2 or (sel_bottom - sel_top) < 2:
+            return full_img
+
+        return full_img.crop((sel_left, sel_top, sel_right, sel_bottom))
 
     # -------------------------
-    # Progress Bar Update
+    # Denoising
+    # -------------------------
+    def on_denoise_toggle(self):
+        """Called when the checkbox is toggled."""
+        self.redisplay_with_exposure()
+
+    def on_denoise_param_change(self, event=None):
+        """Called when any scale changes, if denoise is active, re-render."""
+        if self.enable_denoise_var.get():
+            self.redisplay_with_exposure()
+
+    # -------------------------
+    # Progress Bar
     # -------------------------
     def update_progress_bar(self):
-        """
-        Maps current_index to a percentage of the list.
-        First photo => 0%
-        Last photo => 100%
-        """
         if len(self.image_list) <= 1:
             progress = 0.0
         else:
@@ -802,14 +1079,9 @@ class EnhancedImageBrowser:
         self.progress_var.set(progress)
 
     # -------------------------
-    # Rename All JPG by EXIF
+    # Rename All by EXIF
     # -------------------------
     def rename_all_jpg_by_exif(self):
-        """
-        Renames all .jpg/.jpeg files in the source folder to 'YYYY-MM-DD-HH-MM-SS.jpg'
-        based on EXIF 'DateTimeOriginal'. If no EXIF date is found, the file is skipped.
-        After renaming, reload the image list and TreeView.
-        """
         if not self.folder_path:
             self.update_status("No folder selected.")
             return
@@ -822,39 +1094,32 @@ class EnhancedImageBrowser:
             old_path = os.path.join(self.folder_path, old_name)
             try:
                 new_name = self.build_destination_filename_rename(old_path, old_name)
-                if new_name != old_name:  # means we found an EXIF date
+                if new_name != old_name:
                     new_path = os.path.join(self.folder_path, new_name)
                     base, ext = os.path.splitext(new_name)
-                    # If conflict, append counter
                     counter = 1
                     while os.path.exists(new_path):
                         new_path = os.path.join(self.folder_path, f"{base}_{counter}{ext}")
                         counter += 1
-
                     os.rename(old_path, new_path)
                     renamed_count += 1
             except Exception as e:
                 print(f"Could not rename {old_name}: {e}")
 
-        # Reload images
         self.load_images()
         self.populate_folder_tree()
         self.update_status(f"Renamed {renamed_count} file(s) based on EXIF in '{self.folder_path}'.")
 
-        # Regenerate the left thumbnails in the background
+        self.thumb_images_left.clear()  # Clear existing thumbnails
+        self.populate_folder_tree()      # Repopulate tree with updated image_list
         self.start_thumbnail_generation(
             folder_path=self.folder_path,
             image_list=self.image_list,
             thumb_dict=self.thumb_images_left,
-            tree=self.folder_tree,
-            subfolder_name="miniaturas"
+            tree=self.folder_tree
         )
 
     def build_destination_filename_rename(self, source_path, original_name):
-        """
-        Build a new filename using EXIF date if available.
-        If no EXIF date is found, return the original_name (skip rename).
-        """
         try:
             with open(source_path, 'rb') as img_file:
                 tags = exifread.process_file(img_file, stop_tag="EXIF DateTimeOriginal", details=False)
@@ -865,19 +1130,62 @@ class EnhancedImageBrowser:
                     return dt.strftime("%Y-%m-%d-%H-%M-%S") + ".jpg"
         except Exception as e:
             print(f"EXIF reading error for {original_name}: {e}")
-        return original_name  # no rename if no EXIF date found
+        return original_name
+
+    # -------------------------
+    # Delete Image
+    # -------------------------
+    def delete_image(self, event=None):
+        if not self.image_list:
+            self.update_status("No image to delete.")
+            return
+
+        source_image = os.path.join(self.folder_path, self.image_list[self.current_index])
+        eliminadas_folder = os.path.join(self.folder_path, "eliminadas")
+        os.makedirs(eliminadas_folder, exist_ok=True)
+        destination_image = os.path.join(eliminadas_folder, self.image_list[self.current_index])
+
+        try:
+            os.rename(source_image, destination_image)
+            self.update_status(f"Image moved to 'eliminadas' folder: '{destination_image}'.")
+
+            # Remove from image_list
+            del self.image_list[self.current_index]
+
+            # Refresh the folder_tree to update item IDs
+            self.populate_folder_tree()
+
+            # Re-populate the thumbnails
+            self.thumb_images_left.clear()  # Clear existing thumbnails
+            self.populate_folder_tree()      # Repopulate tree with updated image_list
+            self.start_thumbnail_generation(
+                folder_path=self.folder_path,
+                image_list=self.image_list,
+                thumb_dict=self.thumb_images_left,
+                tree=self.folder_tree
+            )
+
+            # Update the selection and display
+            if self.image_list:
+                self.current_index = min(self.current_index, len(self.image_list) - 1)
+                self.display_image(self.current_index, fit=True)
+            else:
+                self.image_canvas.delete("all")
+                self.original_image_pil = None
+                self.display_image_tk = None
+                self.update_status("No images left in the folder.")
+        except Exception as e:
+            self.update_status(f"Failed to delete image: {e}")
+            messagebox.showerror("Error", f"Failed to delete image.\n{e}")
 
     # -------------------------
     # Utilities
     # -------------------------
     def update_status(self, message):
-        """ Update the status bar with the given message """
         self.status_var.set(message)
         self.root.update_idletasks()
 
 def main():
-    # Instead of tk.Tk(), create a ttkbootstrap-themed window with a dark theme
-    # Available dark themes: e.g. "darkly", "cyborg", "superhero", etc.
     app = ttkb.Window(themename="darkly")
     EnhancedImageBrowser(app)
     app.mainloop()
