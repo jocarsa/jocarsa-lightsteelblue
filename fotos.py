@@ -39,6 +39,17 @@ AVAILABLE_THEMES = [
     'solar', 'superhero', 'darkly', 'cyborg', 'vapor'
 ]
 
+# ADDED/CHANGED: Dictionary for aspect-ratio options
+# The key is the menu label, the value is either None (for "libre") or a tuple (width, height).
+# Example: "1080x1920" => (1080, 1920)
+ASPECT_RATIO_OPTIONS = {
+    "libre": None,
+    "1080x1920": (1080, 1920),
+    "1080x1080": (1080, 1080),
+    "1080x1350": (1080, 1350),
+    "1920x1080": (1920, 1080),
+}
+
 class EnhancedImageBrowser:
     def __init__(self, root):
         self.root = root
@@ -95,10 +106,13 @@ class EnhancedImageBrowser:
         # We will NOT keep a giant list of displayed PhotoImages.
         # Instead, we will only keep references for thumbnails and
         # a single reference for the main displayed image.
-        # self.photo_images = []
 
         # Create placeholder image for Treeview
         self.placeholder_image = self.create_placeholder_image()
+
+        # ADDED/CHANGED: Selected aspect ratio mode
+        # This variable will store the final size (width, height) or None for libre
+        self.selected_aspect_size = None  
 
         # Build the UI
         self.create_widgets()
@@ -352,6 +366,15 @@ class EnhancedImageBrowser:
         efectos_menu.add_command(label="Reducción de ruido", command=self.open_denoise_window)
         self.menubar.add_cascade(label="Efectos", menu=efectos_menu)
 
+        # ADDED/CHANGED: Proporciones Menu
+        proporciones_menu = tk.Menu(self.menubar, tearoff=0)
+        for label, wh_tuple in ASPECT_RATIO_OPTIONS.items():
+            proporciones_menu.add_command(
+                label=label,
+                command=lambda l=label: self.set_aspect_ratio_mode(l)
+            )
+        self.menubar.add_cascade(label="Proporciones", menu=proporciones_menu)
+
         # Ayuda Menu
         ayuda_menu = tk.Menu(self.menubar, tearoff=0)
         ayuda_menu.add_command(label="Información", command=self.show_info)
@@ -369,6 +392,19 @@ class EnhancedImageBrowser:
         self.menubar.add_cascade(label="Tema Visual", menu=tema_visual_menu)
 
         self.root.config(menu=self.menubar)
+
+    # ADDED/CHANGED: Set aspect ratio mode
+    def set_aspect_ratio_mode(self, mode_label):
+        """
+        Updates the cropping aspect ratio based on the selected menu item.
+        mode_label is one of the keys of ASPECT_RATIO_OPTIONS (e.g. "1080x1920", "libre", etc.)
+        """
+        self.selected_aspect_size = ASPECT_RATIO_OPTIONS[mode_label]
+        if self.selected_aspect_size is None:
+            self.update_status("Aspect ratio set to 'libre' (no restriction).")
+        else:
+            w, h = self.selected_aspect_size
+            self.update_status(f"Aspect ratio set to {mode_label} ({w}x{h}).")
 
     # -------------------------
     # Cambiar Tema
@@ -829,7 +865,6 @@ class EnhancedImageBrowser:
         self.current_image_path = image_path
 
         # Clear references to old image from the exposure cache
-        # and also make sure we free the old large displayed image:
         self.exposure_cache.clear()
         self.current_display_image_pil = None
         self.display_image_tk = None
@@ -1049,17 +1084,68 @@ class EnhancedImageBrowser:
         self.selection_coords = (self.start_x, self.start_y, self.start_x, self.start_y)
 
     def on_mouse_move(self, event):
+        # Left button drag with aspect-ratio constraint
         if event.state & 0x0100:  # left button pressed
             end_x = self.image_canvas.canvasx(event.x)
             end_y = self.image_canvas.canvasy(event.y)
-            self.selection_coords = (self.start_x, self.start_y, end_x, end_y)
+            # Tentative coords
+            x1, y1 = self.start_x, self.start_y
+            x2, y2 = end_x, end_y
+
+            # ADDED/CHANGED: If we have a fixed aspect ratio, enforce it
+            if self.selected_aspect_size is not None:
+                # Calculate the desired ratio = width/height
+                aspect_w, aspect_h = self.selected_aspect_size
+                desired_ratio = aspect_w / aspect_h if aspect_h != 0 else None
+                if desired_ratio:
+                    dx = x2 - x1
+                    dy = y2 - y1
+                    # We'll match whichever dimension is "dominant" in the drag
+                    # or we can simply fix width from dx and recompute dy
+                    # so that width/height = desired_ratio.
+
+                    # Keep sign of dx, dy to keep the correct quadrant
+                    # but enforce ratio.
+                    if abs(dx) < 1e-5:
+                        # If dx=0, we can't form a ratio horizontally -> fix dx or revert
+                        pass
+                    if abs(dy) < 1e-5:
+                        # If dy=0, we can't form ratio vertically -> fix dy or revert
+                        pass
+
+                    # We can decide to base the rectangle on whichever dimension is bigger
+                    width = abs(dx)
+                    height = abs(dy)
+                    if height == 0:
+                        height = 1.0
+
+                    current_ratio = width / height
+
+                    if current_ratio > desired_ratio:
+                        # Too wide -> fix width
+                        width = desired_ratio * height
+                    else:
+                        # Too tall -> fix height
+                        height = width / desired_ratio
+
+                    # restore sign
+                    dx_sign = 1 if dx >= 0 else -1
+                    dy_sign = 1 if dy >= 0 else -1
+
+                    x2 = x1 + dx_sign * width
+                    y2 = y1 + dy_sign * height
+
+            self.selection_coords = (x1, y1, x2, y2)
             self.redraw_selection()
 
     def on_left_button_release(self, event):
         if self.selection_coords:
             end_x = self.image_canvas.canvasx(event.x)
             end_y = self.image_canvas.canvasy(event.y)
-            self.selection_coords = (self.start_x, self.start_y, end_x, end_y)
+            # We'll keep the final coords from the on_mouse_move logic
+            # so do not override them if we want to preserve aspect ratio
+            # self.selection_coords = (self.start_x, self.start_y, end_x, end_y)
+            pass
 
     def redraw_selection(self):
         self.image_canvas.delete("selection_rect")
@@ -1144,7 +1230,15 @@ class EnhancedImageBrowser:
                     mix=self.denoise_mix_var.get()
                 )
 
+            # ADDED/CHANGED: Crop normally, but if a ratio is selected, also re-scale.
             final_img = self.maybe_crop(full_img)
+
+            # If we have a fixed aspect ratio (not "libre"), then also resize to that ratio.
+            if self.selected_aspect_size is not None:
+                w, h = self.selected_aspect_size
+                # Resample with a good filter
+                final_img = final_img.resize((w, h), self.get_resample_filter())
+
             final_img.save(destination_image, quality=95)
 
             self.update_status(f"Image copied to '{destination_image}'.")
