@@ -92,8 +92,10 @@ class EnhancedImageBrowser:
         # Store current image path
         self.current_image_path = ""
 
-        # List to store references to PhotoImage
-        self.photo_images = []
+        # We will NOT keep a giant list of displayed PhotoImages.
+        # Instead, we will only keep references for thumbnails and
+        # a single reference for the main displayed image.
+        # self.photo_images = []
 
         # Create placeholder image for Treeview
         self.placeholder_image = self.create_placeholder_image()
@@ -549,43 +551,30 @@ class EnhancedImageBrowser:
     def update_bindings(self):
         """
         Update/unbind old keys and rebind with config values.
-        We'll define helper functions to handle named keys vs single chars.
         """
-
-        # 1) Helper sets for known named keys, etc.
         known_named_keys = {
             "Left", "Right", "Up", "Down",
             "KP_Add", "KP_Subtract", "Delete",
             "BackSpace", "Return", "Escape", "Home", "End"
         }
 
-        # 2) Local helper to unbind
         def unbind_key(root, key):
-            """Unbind either single char or named key."""
             if key in known_named_keys:
-                # e.g. key="Left" -> "<Left>"
                 root.unbind(f"<{key}>")
             elif len(key) == 1:
-                # single char (like ",", ".", "z", "q")
                 root.unbind(key)
             else:
-                # fallback: try unbinding with angle brackets
                 root.unbind(f"<{key}>")
 
-        # 3) Local helper to bind
         def bind_key(root, key, callback):
-            """Bind either single char or named key."""
             if key in known_named_keys:
                 root.bind(f"<{key}>", callback)
             elif len(key) == 1:
-                # single character
                 root.bind(key, callback)
             else:
-                # fallback for e.g. "F1", "space" etc.
                 root.bind(f"<{key}>", callback)
 
-        # --- Now unbind old keys (if you wish) ---
-        # These are the keys we'll re-bind from config
+        # Unbind old
         keys_to_unbind = [
             self.config.get("prev_photo", "Left"),
             self.config.get("next_photo", "Right"),
@@ -601,7 +590,7 @@ class EnhancedImageBrowser:
         for k in keys_to_unbind:
             unbind_key(self.root, k)
 
-        # --- Now re-bind from config ---
+        # Re-bind
         bind_key(self.root, self.config["prev_photo"], self.show_previous_image)
         bind_key(self.root, self.config["next_photo"], self.show_next_image)
         bind_key(self.root, self.config["save_photo"], self.copy_image)
@@ -693,13 +682,6 @@ class EnhancedImageBrowser:
         button_frame.grid(row=row, column=0, columnspan=2, pady=10)
         ttkb.Button(button_frame, text="Save", command=save_changes, bootstyle=SUCCESS).pack(side=tk.LEFT, padx=5)
         ttkb.Button(button_frame, text="Cancel", command=cancel, bootstyle=DANGER).pack(side=tk.LEFT, padx=5)
-
-    # -------------------------
-    # Key Event Handler
-    # -------------------------
-    def on_any_key(self, event):
-        # Not strictly necessary to do anything here
-        pass
 
     # -------------------------
     # Folder / File Ops
@@ -826,7 +808,6 @@ class EnhancedImageBrowser:
                     with Image.open(thumb_path) as thumb_img:
                         tk_thumb = ImageTk.PhotoImage(thumb_img)
                         thumb_dict[filename] = tk_thumb
-                        self.photo_images.append(tk_thumb)  # Keep reference
                     # Update the Treeview item with the new thumbnail
                     for item_id in tree.get_children():
                         if tree.item(item_id, "text") == filename:
@@ -846,6 +827,13 @@ class EnhancedImageBrowser:
 
         image_path = os.path.join(self.folder_path, self.image_list[index])
         self.current_image_path = image_path
+
+        # Clear references to old image from the exposure cache
+        # and also make sure we free the old large displayed image:
+        self.exposure_cache.clear()
+        self.current_display_image_pil = None
+        self.display_image_tk = None
+
         try:
             pil_img = Image.open(image_path)
             pil_img = self.apply_exif_orientation(pil_img)
@@ -888,10 +876,10 @@ class EnhancedImageBrowser:
         scaled_h = int(h * self.zoom_scale)
         display_img = pil_img.resize((scaled_w, scaled_h), self.get_resample_filter())
 
-        photo_image = ImageTk.PhotoImage(display_img)
-        self.photo_images.append(photo_image)
-        self.display_image_tk = photo_image
+        # Create a single PhotoImage reference for the current image
+        self.display_image_tk = ImageTk.PhotoImage(display_img)
 
+        # Clear the canvas and draw the new image
         self.image_canvas.delete("all")
         center_x = cw / 2 + self.pan_offset_x
         center_y = ch / 2 + self.pan_offset_y
@@ -1003,6 +991,7 @@ class EnhancedImageBrowser:
             factor_key = round(factor, 2)
             cache_key = (image_path, factor_key)
 
+            # If it's in the cache, return it
             if cache_key in self.exposure_cache:
                 return self.exposure_cache[cache_key]
 
