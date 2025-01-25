@@ -756,7 +756,7 @@ class EnhancedImageBrowser:
 
             if self.image_list:
                 self.current_index = 0
-                self.display_image(self.current_index, fit=True)
+                self.display_image(self.current_index, fit=False)
                 self.update_status(f"Loaded {len(self.image_list)} images from '{self.folder_path}'.")
             else:
                 self.update_status("No JPG images found in the selected folder.")
@@ -792,7 +792,7 @@ class EnhancedImageBrowser:
             selected_index = int(item_id)
             if selected_index != self.current_index:
                 self.current_index = selected_index
-                self.display_image(self.current_index, fit=True)
+                self.display_image(self.current_index, fit=False)
 
     def on_tree_select_seleccion(self, event):
         item_id = self.seleccion_tree.focus()
@@ -964,12 +964,12 @@ class EnhancedImageBrowser:
     def show_previous_image(self, event=None):
         if self.image_list:
             self.current_index = (self.current_index - 1) % len(self.image_list)
-            self.display_image(self.current_index, fit=True)
+            self.display_image(self.current_index, fit=False)
 
     def show_next_image(self, event=None):
         if self.image_list:
             self.current_index = (self.current_index + 1) % len(self.image_list)
-            self.display_image(self.current_index, fit=True)
+            self.display_image(self.current_index, fit=False)
 
     def highlight_current_tree_item(self):
         for item_id in self.folder_tree.get_children():
